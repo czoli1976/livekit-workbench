@@ -358,18 +358,22 @@ pub fn transport(stats: &[RtcStats]) -> TransportStats {
     for s in stats {
         match s {
             RtcStats::LocalCandidate(c) if c.rtc.id == local_id => {
-                t.local_candidate = format!(
-                    "{:?}/{}",
-                    c.local_candidate.candidate_type, c.local_candidate.protocol
-                )
-                .to_lowercase();
+                t.local_candidate = candidate_label(
+                    c.local_candidate
+                        .candidate_type
+                        .as_ref()
+                        .map(|k| format!("{k:?}")),
+                    &c.local_candidate.protocol,
+                );
             }
             RtcStats::RemoteCandidate(c) if c.rtc.id == remote_id => {
-                t.remote_candidate = format!(
-                    "{:?}/{}",
-                    c.remote_candidate.candidate_type, c.remote_candidate.protocol
-                )
-                .to_lowercase();
+                t.remote_candidate = candidate_label(
+                    c.remote_candidate
+                        .candidate_type
+                        .as_ref()
+                        .map(|k| format!("{k:?}")),
+                    &c.remote_candidate.protocol,
+                );
             }
             _ => {}
         }
@@ -393,6 +397,16 @@ pub fn is_platform_codec(name: &str) -> bool {
     .any(|n| name.contains(n))
 }
 
+/// "host/udp", "relay/tcp"…: the candidate type and transport, lower case.
+fn candidate_label(kind: Option<String>, protocol: &str) -> String {
+    let kind = kind.unwrap_or_else(|| "unknown".into()).to_lowercase();
+    if protocol.is_empty() {
+        kind
+    } else {
+        format!("{kind}/{}", protocol.to_lowercase())
+    }
+}
+
 pub fn rate_mbps(now: u64, before: u64, dt: f64) -> f64 {
     now.saturating_sub(before) as f64 * 8.0 / dt.max(1e-3) / 1e6
 }
@@ -400,6 +414,12 @@ pub fn rate_mbps(now: u64, before: u64, dt: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn candidate_labels() {
+        assert_eq!(candidate_label(Some("Host".into()), "UDP"), "host/udp");
+        assert_eq!(candidate_label(None, "tcp"), "unknown/tcp");
+    }
 
     #[test]
     fn rates() {

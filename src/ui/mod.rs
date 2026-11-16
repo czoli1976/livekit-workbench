@@ -142,6 +142,8 @@ impl App {
                     "caps" => app.show_caps = true,
                     "profiles" => app.show_profiles = true,
                     "about" => app.show_about = true,
+                    "far" => app.remote_undocked = true,
+                    "local" => app.local_undocked = true,
                     _ => {}
                 }
             }
@@ -661,6 +663,13 @@ impl App {
         self.server.kill_now();
         self.viewer = None;
     }
+}
+
+/// Whether the main window is in full-screen mode (always asked of the root).
+fn main_is_fullscreen(ctx: &egui::Context) -> bool {
+    ctx.input_for(egui::ViewportId::ROOT, |i| {
+        i.viewport().fullscreen.unwrap_or(false)
+    })
 }
 
 /// The resting state a transitional phase belongs to, for the phase indicator.

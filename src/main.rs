@@ -44,7 +44,8 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1400.0, 900.0])
             .with_min_inner_size([980.0, 640.0])
-            .with_title(version::APP_NAME),
+            .with_title(version::APP_NAME)
+            .with_fullscreen(std::env::var_os("WB_FULLSCREEN").is_some()),
         ..Default::default()
     };
     eframe::run_native(

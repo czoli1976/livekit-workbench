@@ -113,27 +113,57 @@ impl App {
             .with_title("Stats & Telemetry · Workbench for LiveKit")
             .with_inner_size([1100.0, 780.0])
             .with_min_inner_size([640.0, 400.0]);
+        if super::main_is_fullscreen(ctx) {
+            // Full screen: a floating panel inside the main window (see previews).
+            let mut open = true;
+            egui::Window::new("Stats & Telemetry")
+                .id(egui::Id::unique("stats-embedded"))
+                .open(&mut open)
+                .resizable(true)
+                .collapsible(false)
+                .default_size([1000.0, 700.0])
+                .show(ctx, |ui| {
+                    self.stats_toolbar(ui);
+                    ui.separator();
+                    self.stats_body(ui);
+                });
+            if !open {
+                self.show_stats = false;
+            }
+            return;
+        }
         let mut close = false;
         ctx.show_viewport_immediate(id, builder, |ui, _| {
-            egui::Panel::top("stats-top").show(ui, |ui| {
-                ui.add_space(4.0);
-                self.stats_toolbar(ui);
-                ui.add_space(4.0);
-            });
-            egui::CentralPanel::default_margins().show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .auto_shrink(false)
-                    .show(ui, |ui| match self.stats_ui.tab {
-                        StatsTab::Stats => self.stats_tab(ui),
-                        StatsTab::Server => self.server_tab(ui),
-                        StatsTab::Telemetry => telemetry_tab(ui),
-                    });
-            });
-            close = ui.ctx().input(|i| i.viewport().close_requested());
+            egui::Panel::top("stats-top")
+                .frame(super::theme::top_frame())
+                .show(ui, |ui| {
+                    self.stats_toolbar(ui);
+                });
+            egui::CentralPanel::default_margins()
+                .frame(super::theme::central_frame())
+                .show(ui, |ui| {
+                    self.stats_body(ui);
+                });
+            // Cancel the OS close and stop showing the window instead (see previews).
+            if ui.ctx().input(|i| i.viewport().close_requested()) {
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                close = true;
+            }
         });
         if close {
             self.show_stats = false;
         }
+    }
+
+    fn stats_body(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical()
+            .auto_shrink(false)
+            .show(ui, |ui| match self.stats_ui.tab {
+                StatsTab::Stats => self.stats_tab(ui),
+                StatsTab::Server => self.server_tab(ui),
+                StatsTab::Telemetry => telemetry_tab(ui),
+            });
     }
 
     fn stats_toolbar(&mut self, ui: &mut egui::Ui) {
@@ -495,7 +525,7 @@ impl App {
                                 }
                             )
                         } else {
-                            format!("{} (this app)", r.who)
+                            r.who.clone()
                         };
                         ui.label(who);
                         ui.label(match r.requested {

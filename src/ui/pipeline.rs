@@ -595,7 +595,11 @@ impl App {
         ui.painter().text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
-            "Shown in its own window",
+            if super::main_is_fullscreen(ui.ctx()) {
+                "Shown in a floating panel"
+            } else {
+                "Shown in its own window"
+            },
             egui::FontId::proportional(13.0),
             widgets::weak(ui),
         );
@@ -609,52 +613,39 @@ impl App {
     }
 
     /// Undocked previews, each in its own native window.
+    /// Undocked previews. Each opens in its own native window, or, while the
+    /// main window is full screen, as a floating panel inside it: macOS puts
+    /// full-screen apps in their own Space, where extra windows misbehave.
     pub(super) fn preview_windows(&mut self, ctx: &egui::Context) {
         let (local_slot, remote_slot) = {
             let s = self.session.shared.lock();
             (s.local_preview.clone(), s.remote_preview.clone())
         };
+        let embedded = super::main_is_fullscreen(ctx);
         if self.local_undocked {
-            let id = egui::ViewportId::from_hash_of("local-preview");
-            let builder = egui::ViewportBuilder::default()
-                .with_title("Local · into the encoder")
-                .with_inner_size([800.0, 450.0])
-                .with_min_inner_size([240.0, 135.0]);
-            let mut close = false;
-            ctx.show_viewport_immediate(id, builder, |ui, _| {
-                egui::CentralPanel::no_frame().show(ui, |ui| {
-                    let size = ui.available_size();
-                    self.local_pane
-                        .paint(ui, &local_slot, "local-window", size, "No local video");
-                });
-                close = ui.ctx().input(|i| i.viewport().close_requested());
-            });
+            let (close, _) = show_preview_window(
+                ctx,
+                embedded,
+                "local-preview",
+                "Local · into the encoder",
+                &mut self.local_pane,
+                &local_slot,
+                "No local video",
+            );
             if close {
                 self.local_undocked = false;
             }
         }
         if self.remote_undocked {
-            let id = egui::ViewportId::from_hash_of("far-preview");
-            let builder = egui::ViewportBuilder::default()
-                .with_title("Far end · decoded")
-                .with_inner_size([800.0, 450.0])
-                .with_min_inner_size([240.0, 135.0]);
-            let mut close = false;
-            let mut tile = None;
-            ctx.show_viewport_immediate(id, builder, |ui, _| {
-                egui::CentralPanel::no_frame().show(ui, |ui| {
-                    let size = ui.available_size();
-                    let r = self.remote_pane.paint(
-                        ui,
-                        &remote_slot,
-                        "far-window",
-                        size,
-                        "No decoded video",
-                    );
-                    tile = Some((r, ui.ctx().pixels_per_point()));
-                });
-                close = ui.ctx().input(|i| i.viewport().close_requested());
-            });
+            let (close, tile) = show_preview_window(
+                ctx,
+                embedded,
+                "far-preview",
+                "Far end · decoded",
+                &mut self.remote_pane,
+                &remote_slot,
+                "No decoded video",
+            );
             if let Some((r, ppp)) = tile {
                 self.observe_tile(r, ppp);
             }
@@ -734,6 +725,55 @@ impl App {
             );
         }
     }
+}
+
+/// One undocked preview. Returns (dock back, tile rect and pixels per point).
+fn show_preview_window(
+    ctx: &egui::Context,
+    embedded: bool,
+    key: &str,
+    title: &str,
+    pane: &mut PreviewPane,
+    slot: &SharedPreview,
+    placeholder: &str,
+) -> (bool, Option<(egui::Rect, f32)>) {
+    let mut tile = None;
+    if embedded {
+        let mut open = true;
+        egui::Window::new(title)
+            .id(egui::Id::unique((key, "embedded")))
+            .open(&mut open)
+            .resizable(true)
+            .collapsible(false)
+            .default_size([800.0, 450.0])
+            .min_size([240.0, 135.0])
+            .show(ctx, |ui| {
+                let size = ui.available_size().max(egui::vec2(240.0, 135.0));
+                let r = pane.paint(ui, slot, &format!("{key}-panel"), size, placeholder);
+                tile = Some((r, ui.ctx().pixels_per_point()));
+            });
+        return (!open, tile);
+    }
+    let builder = egui::ViewportBuilder::default()
+        .with_title(title)
+        .with_inner_size([800.0, 450.0])
+        .with_min_inner_size([240.0, 135.0]);
+    let mut close = false;
+    ctx.show_viewport_immediate(egui::ViewportId::from_hash_of(key), builder, |ui, _| {
+        egui::CentralPanel::no_frame().show(ui, |ui| {
+            let size = ui.available_size();
+            let r = pane.paint(ui, slot, &format!("{key}-window"), size, placeholder);
+            tile = Some((r, ui.ctx().pixels_per_point()));
+        });
+        // Do not let the window be torn down from under the frame: cancel the
+        // close and dock back, which removes the window on the next frame.
+        if ui.ctx().input(|i| i.viewport().close_requested()) {
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            close = true;
+        }
+    });
+    (close, tile)
 }
 
 pub fn quality_name(q: VideoQuality) -> &'static str {
