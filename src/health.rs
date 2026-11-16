@@ -81,6 +81,8 @@ pub struct HealthInput {
     /// Height of the layer the subscriber asked for, if it asked; 0 = no request.
     pub requested_height: u32,
     pub received_height: u32,
+    /// The server's rating of the subscriber connection: "Poor", "Lost"…
+    pub server_quality_sub: String,
 
     pub sent_fps: f64,
     pub decode_fps: f64,
@@ -266,6 +268,21 @@ fn sfu(i: &HealthInput) -> Verdict {
             ),
         );
     }
+    match i.server_quality_sub.as_str() {
+        "Lost" => {
+            return Verdict::new(
+                Health::Failing,
+                "Server rates the subscriber connection lost",
+            )
+        }
+        "Poor" => {
+            return Verdict::new(
+                Health::Degraded,
+                "Server rates the subscriber connection poor",
+            )
+        }
+        _ => {}
+    }
     Verdict::new(Health::Good, "Forwarding")
 }
 
@@ -450,6 +467,17 @@ mod tests {
             Health::Good,
             "near the ask is fine"
         );
+    }
+
+    #[test]
+    fn sfu_server_rating() {
+        let mut i = healthy();
+        i.server_quality_sub = "Poor".into();
+        assert_eq!(evaluate(&i).sfu.health, Health::Degraded);
+        i.server_quality_sub = "Lost".into();
+        assert_eq!(evaluate(&i).sfu.health, Health::Failing);
+        i.server_quality_sub = "Excellent".into();
+        assert_eq!(evaluate(&i).sfu.health, Health::Good);
     }
 
     #[test]

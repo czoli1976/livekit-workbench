@@ -78,6 +78,12 @@ fn line(s: &Session, sec: u64) -> (u32, f64) {
             }
         }
     }
+    if std::env::var("WB_QUALITY").is_ok() {
+        println!(
+            "      server quality: pub {:?} sub {:?}",
+            snap.server_quality_pub, snap.server_quality_sub
+        );
+    }
     if std::env::var("WB_LAYERS").is_ok() {
         for l in &snap.layers {
             println!(

@@ -136,6 +136,9 @@ pub struct Snapshot {
     /// Tile size last sent with "Ask optimal resolution".
     pub requested_size: Option<(u32, u32)>,
     pub requested_ago_s: Option<f64>,
+    /// The server's rating of the publisher's and the subscriber's connection.
+    pub server_quality_pub: Option<String>,
+    pub server_quality_sub: Option<String>,
     pub fec_negotiated: bool,
     /// Increments on every sample, so viewers can tell a new one arrived.
     pub seq: u64,

@@ -434,6 +434,10 @@ impl App {
                         ui.label(big("–"));
                     }
                 }
+                if let (Some(p), Some(s)) = (&snap.server_quality_pub, &snap.server_quality_sub) {
+                    ui.label(RichText::new(format!("Server rates: publisher {p} · subscriber {s}")).small().color(weak))
+                        .on_hover_text("The LiveKit server's own rating of each connection (ConnectionQualityUpdate), from the loss, jitter and bitrate it sees. The only per-participant judgement the server sends to clients.");
+                }
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Subscriber asks for").small());
                     live_badge(ui);

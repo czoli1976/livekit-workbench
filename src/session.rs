@@ -280,6 +280,9 @@ struct Connection {
     prev: Prev,
     health_window: VecDeque<HealthInput>,
     requested: Option<((u32, u32), Instant)>,
+    /// The server's own rating of each connection (ConnectionQualityUpdate).
+    quality_pub: Option<ConnectionQuality>,
+    quality_sub: Option<ConnectionQuality>,
 }
 
 struct Engine {
@@ -433,6 +436,8 @@ impl Engine {
             prev: Prev::default(),
             health_window: VecDeque::new(),
             requested: None,
+            quality_pub: None,
+            quality_sub: None,
         });
         Ok(())
     }
@@ -791,6 +796,34 @@ impl Engine {
                     self.event(format!("{id} left"));
                 }
             }
+            RoomEvent::ConnectionQualityChanged {
+                participant,
+                quality,
+            } => {
+                let Some(conn) = self.conn.as_mut() else {
+                    return;
+                };
+                let id = participant.identity().to_string();
+                let (slot, who) = if matches!(participant, Participant::Local(_)) {
+                    (&mut conn.quality_sub, "subscriber")
+                } else if id.starts_with("workbench-pub-") {
+                    (&mut conn.quality_pub, "publisher")
+                } else {
+                    return;
+                };
+                if *slot != Some(quality) {
+                    if slot.is_some() {
+                        let text = format!(
+                            "Server rates the {who} connection {}",
+                            quality_label(quality).to_lowercase()
+                        );
+                        *slot = Some(quality);
+                        self.event(text);
+                    } else {
+                        *slot = Some(quality);
+                    }
+                }
+            }
             RoomEvent::DataReceived {
                 payload,
                 topic,
@@ -1074,6 +1107,8 @@ impl Engine {
 
             // Requested tile size.
             snap.requested_size = conn.requested.map(|(s, _)| s);
+            snap.server_quality_pub = conn.quality_pub.map(|q| quality_label(q).to_string());
+            snap.server_quality_sub = conn.quality_sub.map(|q| quality_label(q).to_string());
             snap.requested_ago_s = conn.requested.map(|(_, at)| at.elapsed().as_secs_f64());
 
             // Histories.
@@ -1149,6 +1184,10 @@ impl Engine {
                     seconds_since_send: if total_sent > 0.0 || first { 0.0 } else { dt },
                     requested_height: requested_h,
                     received_height: me.as_ref().map(|r| r.height).unwrap_or(0),
+                    server_quality_sub: conn
+                        .quality_sub
+                        .map(|q| quality_label(q).to_string())
+                        .unwrap_or_default(),
                     sent_fps: top.as_ref().map(|t| t.fps).unwrap_or(0.0),
                     decode_fps: me.as_ref().map(|r| r.fps).unwrap_or(0.0),
                     loss_ratio: me.as_ref().map(|r| r.loss_ratio).unwrap_or(0.0),
@@ -1287,6 +1326,15 @@ fn apply_request(remote: &Remote, size: Option<(u32, u32)>) {
         None => remote.original,
     };
     remote.publication.update_video_dimensions(dim);
+}
+
+pub fn quality_label(q: ConnectionQuality) -> &'static str {
+    match q {
+        ConnectionQuality::Excellent => "Excellent",
+        ConnectionQuality::Good => "Good",
+        ConnectionQuality::Poor => "Poor",
+        ConnectionQuality::Lost => "Lost",
+    }
 }
 
 fn events_time() -> String {

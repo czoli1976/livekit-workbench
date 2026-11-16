@@ -605,6 +605,15 @@ impl App {
                     kv(ui, "Pair changes", t.pair_changes.to_string());
                     kv(
                         ui,
+                        "Server rating",
+                        format!(
+                            "publisher {} · subscriber {}",
+                            snap.server_quality_pub.as_deref().unwrap_or("–"),
+                            snap.server_quality_sub.as_deref().unwrap_or("–")
+                        ),
+                    );
+                    kv(
+                        ui,
                         "Video FEC",
                         if snap.fec_negotiated {
                             "FlexFEC negotiated"
