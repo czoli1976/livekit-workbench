@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Workbench viewer</title>
+<style>
+  :root { color-scheme: light dark; --fg:#1c1c1a; --muted:#6b6a65; --bg:#f6f5f1; --card:#ffffff; --line:#dcdad2; --ok:#2e7d4f; --bad:#b3402a; }
+  @media (prefers-color-scheme: dark) { :root { --fg:#ecebe6; --muted:#a09f98; --bg:#161615; --card:#222220; --line:#3a3936; --ok:#6fcf97; --bad:#ef8f7a; } }
+  body { margin:0; font:14px/1.5 system-ui, sans-serif; color:var(--fg); background:var(--bg); }
+  main { max-width:1100px; margin:0 auto; padding:16px; }
+  h1 { font-size:18px; font-weight:600; margin:0 0 4px; }
+  #status { color:var(--muted); margin-bottom:12px; }
+  #status.ok { color:var(--ok); } #status.bad { color:var(--bad); }
+  #stage { background:#000; border-radius:8px; overflow:hidden; aspect-ratio:16/9; display:flex; align-items:center; justify-content:center; color:#888; }
+  #stage video { width:100%; height:100%; object-fit:contain; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:8px; margin:12px 0; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:8px 10px; }
+  .card .k { font-size:12px; color:var(--muted); } .card .v { font-size:17px; font-weight:600; word-break:break-word; }
+  h2 { font-size:14px; font-weight:600; margin:16px 0 6px; }
+  code, pre { font:12px/1.5 ui-monospace, monospace; }
+  pre { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:8px 10px; white-space:pre-wrap; margin:0; }
+  .note { color:var(--muted); font-size:12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Workbench for LiveKit · browser viewer</h1>
+  <div id="status">Loading…</div>
+  <div id="stage">Waiting for video</div>
+  <div class="grid">
+    <div class="card"><div class="k">Codec received</div><div class="v" id="codec">-</div></div>
+    <div class="card"><div class="k">Decoder</div><div class="v" id="decoder">-</div></div>
+    <div class="card"><div class="k">Hardware decode</div><div class="v" id="hw">-</div></div>
+    <div class="card"><div class="k">Decoded size</div><div class="v" id="size">-</div></div>
+    <div class="card"><div class="k">Decoded frame rate</div><div class="v" id="fps">-</div></div>
+    <div class="card"><div class="k">Receive bitrate</div><div class="v" id="bitrate">-</div></div>
+    <div class="card"><div class="k">Frames decoded / dropped</div><div class="v" id="frames">-</div></div>
+    <div class="card"><div class="k">Packets lost</div><div class="v" id="lost">-</div></div>
+    <div class="card"><div class="k">Freezes</div><div class="v" id="freezes">-</div></div>
+    <div class="card"><div class="k">Asks the SFU for</div><div class="v" id="asked">-</div></div>
+  </div>
+  <p class="note">This page sends the numbers above back to the Workbench app once a second over the room's data channel (topic <code>workbench.viewer-stats</code>), so they appear in its Stats &amp; Telemetry window.</p>
+  <h2>Video codecs this browser says it can receive</h2>
+  <pre id="caps">-</pre>
+  <h2>Browser</h2>
+  <pre id="ua">-</pre>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2.24.0/dist/livekit-client.umd.min.js"></script>
+<script>
+const TOPIC = 'workbench.viewer-stats';
+const $ = (id) => document.getElementById(id);
+const setStatus = (text, cls) => { $('status').textContent = text; $('status').className = cls || ''; };
+$('ua').textContent = navigator.userAgent;
+try {
+  const caps = RTCRtpReceiver.getCapabilities('video').codecs
+    .filter(c => !/rtx|red|ulpfec|flexfec/i.test(c.mimeType))
+    .map(c => c.mimeType.replace('video/', '') + (c.sdpFmtpLine ? '  ' + c.sdpFmtpLine : ''));
+  $('caps').textContent = [...new Set(caps)].join('\n');
+} catch (e) { $('caps').textContent = 'Could not read capabilities: ' + e; }
+
+// Short browser label such as "Chrome 142" for the app's subscriber table.
+function browserLabel() {
+  const ua = navigator.userAgent;
+  const m = ua.match(/(Edg|OPR|Chrome|Firefox|Version)\/(\d+)/);
+  if (!m) return 'browser';
+  const name = { Edg: 'Edge', OPR: 'Opera', Version: 'Safari' }[m[1]] || m[1];
+  return name + ' ' + m[2];
+}
+
+const params = new URLSearchParams(location.hash.slice(1));
+const url = params.get('url'), token = params.get('token');
+const adaptive = params.get('adaptive') === '1';
+let videoEl = null;
+let room = null, track = null, prev = null;
+
+async function sample() {
+  if (!track || !room) return;
+  let report;
+  try { report = await track.getRTCStatsReport(); } catch (e) { return; }
+  if (!report) return;
+  let inbound = null; const codecs = {};
+  report.forEach(s => {
+    if (s.type === 'inbound-rtp' && s.kind === 'video') inbound = s;
+    if (s.type === 'codec') codecs[s.id] = s;
+  });
+  if (!inbound) return;
+  const c = codecs[inbound.codecId];
+  const codec = c ? c.mimeType.replace('video/', '') : '';
+  const out = {
+    codec, decoder: inbound.decoderImplementation || '',
+    width: inbound.frameWidth || 0, height: inbound.frameHeight || 0,
+    freezes: inbound.freezeCount || 0, freezeSeconds: inbound.totalFreezesDuration || 0,
+    lost: inbound.packetsLost || 0, nack: inbound.nackCount || 0, pli: inbound.pliCount || 0,
+    fecPackets: inbound.fecPacketsReceived || 0, userAgent: browserLabel(),
+    fps: 0, mbps: 0, decodeMs: 0, jitterBufferMs: 0, lossRatio: 0,
+  };
+  // With adaptive stream the SDK asks the SFU for a layer that fits the element.
+  if (adaptive && videoEl) {
+    const dpr = window.devicePixelRatio || 1;
+    out.requestedWidth = Math.round(videoEl.clientWidth * dpr);
+    out.requestedHeight = Math.round(videoEl.clientHeight * dpr);
+  }
+  if (inbound.powerEfficientDecoder !== undefined) out.powerEfficient = inbound.powerEfficientDecoder;
+  if (prev) {
+    const dt = (inbound.timestamp - prev.timestamp) / 1000;
+    if (dt > 0) {
+      out.mbps = (inbound.bytesReceived - prev.bytesReceived) * 8 / dt / 1e6;
+      const frames = inbound.framesDecoded - prev.framesDecoded;
+      out.fps = frames / dt;
+      if (frames > 0) out.decodeMs = (inbound.totalDecodeTime - prev.totalDecodeTime) * 1000 / frames;
+      const emitted = (inbound.jitterBufferEmittedCount || 0) - (prev.jitterBufferEmittedCount || 0);
+      if (emitted > 0) out.jitterBufferMs = ((inbound.jitterBufferDelay || 0) - (prev.jitterBufferDelay || 0)) * 1000 / emitted;
+      const packets = (inbound.packetsReceived || 0) - (prev.packetsReceived || 0);
+      const lost = Math.max(0, (inbound.packetsLost || 0) - (prev.packetsLost || 0));
+      if (packets + lost > 0) out.lossRatio = lost / (packets + lost);
+    }
+  }
+  prev = inbound;
+
+  $('codec').textContent = codec || '-';
+  $('decoder').textContent = out.decoder || '-';
+  $('hw').textContent = out.powerEfficient === undefined ? 'not reported' : (out.powerEfficient ? 'yes' : 'no');
+  $('size').textContent = out.width ? out.width + '×' + out.height : '-';
+  $('frames').textContent = (inbound.framesDecoded || 0) + ' / ' + (inbound.framesDropped || 0);
+  $('lost').textContent = String(out.lost);
+  $('asked').textContent = adaptive ? (out.requestedWidth + '×' + out.requestedHeight + ' (adaptive stream)') : 'top layer (adaptive stream off)';
+  $('freezes').textContent = out.freezes + ' · ' + out.freezeSeconds.toFixed(1) + ' s';
+  $('bitrate').textContent = out.mbps.toFixed(2) + ' Mbps';
+  $('fps').textContent = out.fps.toFixed(1) + ' fps';
+
+  try {
+    const bytes = new TextEncoder().encode(JSON.stringify(out));
+    await room.localParticipant.publishData(bytes, { reliable: false, topic: TOPIC });
+  } catch (e) { /* the app may have left; keep sampling */ }
+}
+
+async function main() {
+  if (!url || !token) { setStatus('This page needs a link from the Workbench for LiveKit app (missing url or token).', 'bad'); return; }
+  if (!window.LivekitClient) { setStatus('Could not load the LiveKit JavaScript SDK from the CDN.', 'bad'); return; }
+  const LK = window.LivekitClient;
+  room = new LK.Room({ adaptiveStream: adaptive, dynacast: false });
+  room.on(LK.RoomEvent.TrackSubscribed, (t, pub, participant) => {
+    if (t.kind !== 'video') return;
+    track = t; prev = null;
+    const el = t.attach(); el.muted = true; el.playsInline = true; videoEl = el;
+    $('stage').replaceChildren(el);
+    setStatus('Receiving video from ' + participant.identity, 'ok');
+  });
+  room.on(LK.RoomEvent.TrackUnsubscribed, (t) => {
+    if (t === track) { track = null; $('stage').textContent = 'Publisher stopped'; setStatus('Connected, no video', ''); }
+  });
+  room.on(LK.RoomEvent.TrackSubscriptionFailed, (sid, participant, reason) => {
+    setStatus('Subscription failed for a track from ' + (participant && participant.identity) + ': ' + reason, 'bad');
+  });
+  room.on(LK.RoomEvent.Disconnected, (reason) => setStatus('Disconnected (' + reason + ')', 'bad'));
+  try {
+    setStatus('Connecting to ' + url + ' …');
+    await room.connect(url, token);
+    if (!track) setStatus('Connected to room "' + room.name + '". Waiting for a publisher…', '');
+  } catch (e) { setStatus('Connect failed: ' + e.message, 'bad'); }
+  setInterval(sample, 1000);
+}
+main();
+</script>
+</body>
+</html>

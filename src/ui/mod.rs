@@ -1,0 +1,738 @@
+//! The main window and the state behind every window.
+
+mod dialogs;
+mod form;
+mod pipeline;
+mod stats_window;
+mod theme;
+mod widgets;
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use eframe::egui::{self, RichText};
+use parking_lot::Mutex;
+
+use crate::capabilities::HostCaps;
+use crate::capture::{self, CameraDesc, CameraFormat, SourceKind};
+use crate::local_server::{LocalServer, ServerState};
+use crate::profiles::{LocalServerOptions, Profile, ProfileStore};
+use crate::session::{self, ConnectConfig, Phase, Session, VideoQuality};
+use crate::throttle::{SizeThrottle, DEFAULT_INTERVAL};
+use crate::version;
+use crate::viewer::ViewerServer;
+
+use dialogs::ProfileEditor;
+use form::PublishForm;
+use pipeline::{ChartMetric, PreviewLayout, PreviewPane};
+use stats_window::StatsUi;
+
+pub struct App {
+    rt: tokio::runtime::Runtime,
+    session: Session,
+    caps: HostCaps,
+
+    store: ProfileStore,
+    profile_id: String,
+    /// The profile and secret of the current connection (for viewer tokens).
+    connection: Option<(Profile, String)>,
+    room: String,
+    auto_publish: bool,
+
+    server: LocalServer,
+    /// What the background poller should watch; None when the profile is remote.
+    server_opts: Arc<Mutex<Option<LocalServerOptions>>>,
+
+    form: PublishForm,
+    cameras: Vec<CameraDesc>,
+    camera_formats: Vec<CameraFormat>,
+    formats_for: Option<u32>,
+    camera_error: Option<String>,
+
+    previews: bool,
+    chart: ChartMetric,
+    layout: PreviewLayout,
+    local_undocked: bool,
+    remote_undocked: bool,
+    local_pane: PreviewPane,
+    remote_pane: PreviewPane,
+    ask_optimal: bool,
+    throttle: SizeThrottle,
+    quality: VideoQuality,
+
+    viewer: Option<ViewerServer>,
+    invites: u32,
+    invite_note: String,
+
+    show_stats: bool,
+    show_caps: bool,
+    show_profiles: bool,
+    show_about: bool,
+    profile_editor: ProfileEditor,
+    stats_ui: StatsUi,
+    notice: Option<(String, Instant)>,
+    autoconnect_pending: bool,
+    /// Browser viewers ask the SFU for a layer that fits their video element.
+    browser_adaptive: bool,
+}
+
+impl App {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_name("workbench-rt")
+            .build()
+            .expect("tokio runtime");
+        theme::install(&cc.egui_ctx);
+        let ctx = cc.egui_ctx.clone();
+        let repaint: Arc<dyn Fn() + Send + Sync> = Arc::new(move || ctx.request_repaint());
+        let session = Session::start(rt.handle(), repaint);
+
+        let mut store = ProfileStore::load();
+        store.repair();
+        let profile = store.default_profile().clone();
+        let server = LocalServer::default();
+        let server_opts = Arc::new(Mutex::new(None));
+
+        let mut app = Self {
+            caps: HostCaps::probe(),
+            session,
+            profile_id: profile.id.clone(),
+            connection: None,
+            room: profile.default_room.clone(),
+            auto_publish: true,
+            store,
+            server,
+            server_opts,
+            form: PublishForm::default(),
+            cameras: Vec::new(),
+            camera_formats: Vec::new(),
+            formats_for: None,
+            camera_error: None,
+            previews: true,
+            chart: ChartMetric::Bitrate,
+            layout: PreviewLayout::SideBySide,
+            local_undocked: false,
+            remote_undocked: false,
+            local_pane: PreviewPane::default(),
+            remote_pane: PreviewPane::default(),
+            ask_optimal: false,
+            throttle: SizeThrottle::new(DEFAULT_INTERVAL),
+            quality: VideoQuality::High,
+            viewer: None,
+            invites: 0,
+            invite_note: String::new(),
+            show_stats: false,
+            show_caps: false,
+            show_profiles: false,
+            show_about: false,
+            profile_editor: ProfileEditor::default(),
+            stats_ui: StatsUi::default(),
+            notice: None,
+            browser_adaptive: false,
+            autoconnect_pending: std::env::var_os("WB_AUTOCONNECT").is_some(),
+            rt,
+        };
+        app.sanitize_form();
+        // WB_OPEN=stats,caps,profiles,about opens those windows at start-up (demos, checks).
+        if let Ok(open) = std::env::var("WB_OPEN") {
+            for w in open.split(',') {
+                match w.trim() {
+                    "stats" => app.show_stats = true,
+                    "caps" => app.show_caps = true,
+                    "profiles" => app.show_profiles = true,
+                    "about" => app.show_about = true,
+                    _ => {}
+                }
+            }
+        }
+        app.start_server_poller();
+        app.activate_profile_server(true);
+        app.start_viewer_server();
+        app.refresh_cameras();
+        app
+    }
+
+    fn current_profile(&self) -> Profile {
+        self.store
+            .get(&self.profile_id)
+            .cloned()
+            .unwrap_or_else(|| self.store.default_profile().clone())
+    }
+
+    fn save_store(&mut self) {
+        if let Err(e) = self.store.save() {
+            self.notify(format!("Could not save profiles: {e:#}"));
+        }
+    }
+
+    fn notify(&mut self, text: impl Into<String>) {
+        self.notice = Some((text.into(), Instant::now()));
+    }
+
+    // ---- Cameras
+
+    fn refresh_cameras(&mut self) {
+        match capture::list_cameras() {
+            Ok(c) => {
+                self.cameras = c;
+                self.camera_error = None;
+            }
+            Err(e) => {
+                self.cameras.clear();
+                self.camera_error = Some(format!("{e:#}"));
+            }
+        }
+        self.formats_for = None;
+        if let SourceKind::Camera(i) = self.form.source {
+            if !self.cameras.iter().any(|c| c.index == i) {
+                self.form.source = SourceKind::Detail;
+            }
+        }
+    }
+
+    fn load_formats(&mut self, index: u32) {
+        if self.formats_for == Some(index) {
+            return;
+        }
+        self.formats_for = Some(index);
+        self.camera_formats.clear();
+        match capture::camera_formats(index) {
+            Ok(f) => {
+                self.camera_error = None;
+                let current = (self.form.capture, self.form.fps);
+                if !f.iter().any(|x| ((x.width, x.height), x.fps) == current) {
+                    // Prefer 1080p30 or the closest below it, else the first format.
+                    let pick = f
+                        .iter()
+                        .find(|x| x.width <= 1920 && x.fps <= 30)
+                        .or_else(|| f.first())
+                        .copied();
+                    if let Some(x) = pick {
+                        self.form.capture = (x.width, x.height);
+                        self.form.fps = x.fps;
+                    }
+                }
+                self.camera_formats = f;
+            }
+            Err(e) => self.camera_error = Some(format!("{e:#}")),
+        }
+    }
+
+    // ---- Local server
+
+    fn start_server_poller(&self) {
+        let server = self.server.clone();
+        let opts = self.server_opts.clone();
+        self.rt.spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                tick.tick().await;
+                let o = opts.lock().clone();
+                if let Some(o) = o {
+                    server.poll(&o).await;
+                }
+            }
+        });
+    }
+
+    /// Start or stop the local server to match the selected profile.
+    fn activate_profile_server(&mut self, at_launch: bool) {
+        let p = self.current_profile();
+        if p.is_local() {
+            *self.server_opts.lock() = Some(p.local.clone());
+            let should_start = !at_launch || p.local.start_with_app;
+            if should_start
+                && matches!(
+                    self.server.state(),
+                    ServerState::Stopped | ServerState::Failed(_)
+                )
+            {
+                self.start_server();
+            }
+        } else {
+            *self.server_opts.lock() = None;
+            let server = self.server.clone();
+            self.rt.spawn(async move { server.stop().await });
+        }
+    }
+
+    fn start_server(&mut self) {
+        let p = self.current_profile();
+        if !p.is_local() {
+            return;
+        }
+        let server = self.server.clone();
+        self.rt.spawn(async move {
+            if let Err(e) = server.start(p.local).await {
+                log::warn!("local server: {e:#}");
+            }
+        });
+    }
+
+    fn restart_server(&mut self) {
+        let p = self.current_profile();
+        if !p.is_local() {
+            return;
+        }
+        *self.server_opts.lock() = Some(p.local.clone());
+        if self.session.phase().connected() {
+            self.session.disconnect();
+        }
+        let server = self.server.clone();
+        self.rt.spawn(async move {
+            server.stop().await;
+            if let Err(e) = server.start(p.local).await {
+                log::warn!("local server: {e:#}");
+            }
+        });
+    }
+
+    fn server_buttons(&mut self, ui: &mut egui::Ui) {
+        match self.server.state() {
+            ServerState::Running => {
+                if ui.small_button("Restart").clicked() {
+                    self.restart_server();
+                }
+                if ui.small_button("Stop").clicked() {
+                    if self.session.phase().connected() {
+                        self.session.disconnect();
+                    }
+                    let s = self.server.clone();
+                    self.rt.spawn(async move { s.stop().await });
+                }
+            }
+            ServerState::Starting | ServerState::External => {}
+            ServerState::Stopped | ServerState::Failed(_) => {
+                if ui.small_button("Start server").clicked() {
+                    self.start_server();
+                }
+            }
+        }
+    }
+
+    // ---- Connection
+
+    fn connect(&mut self) {
+        let profile = self.current_profile();
+        if let Some(p) = profile.validate().into_iter().next() {
+            self.notify(format!("Profile \"{}\": {p}", profile.name));
+            self.show_profiles = true;
+            return;
+        }
+        if profile.is_local() && !self.server.is_usable() {
+            self.notify("The local server is not running. Start it from the status line below.");
+            return;
+        }
+        let secret = match profile.api_secret() {
+            Ok(s) => s,
+            Err(e) => {
+                self.notify(format!("{e:#}. Add it in Edit profiles."));
+                self.show_profiles = true;
+                return;
+            }
+        };
+        let room = self.room.trim().to_string();
+        if room.is_empty() {
+            self.notify("Enter a room name.");
+            return;
+        }
+        let publish = if self.auto_publish {
+            match self.validate_form() {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    self.notify(format!("Cannot publish: {e}"));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let cfg = ConnectConfig {
+            url: profile.connect_url(),
+            api_key: profile.api_key.trim().to_string(),
+            api_secret: secret.clone(),
+            room,
+            decode: true,
+            preview: self.previews,
+        };
+        self.quality = VideoQuality::High;
+        self.throttle.reset();
+        self.connection = Some((profile, secret));
+        self.session.connect(cfg, publish);
+    }
+
+    fn switch_profile(&mut self, id: String) {
+        if id == self.profile_id {
+            return;
+        }
+        if self.session.phase() != Phase::Disconnected {
+            self.session.disconnect();
+        }
+        let was_local = self.current_profile().is_local();
+        self.profile_id = id;
+        let p = self.current_profile();
+        self.room = p.default_room.clone();
+        if was_local || p.is_local() {
+            self.activate_profile_server(false);
+        }
+        if !p.is_local() && self.stats_ui.tab == stats_window::StatsTab::Server {
+            self.stats_ui.tab = stats_window::StatsTab::Stats;
+        }
+    }
+
+    // ---- Browser viewer
+
+    fn start_viewer_server(&mut self) {
+        match ViewerServer::start() {
+            Ok(v) => self.viewer = Some(v),
+            Err(e) => self.invite_note = format!("Could not start the local HTTP server: {e}"),
+        }
+    }
+
+    fn invite_link(&mut self) -> Option<String> {
+        let viewer = self.viewer.as_ref()?;
+        let (profile, secret) = self.connection.clone()?;
+        let room = self.session.shared.lock().room.clone();
+        self.invites += 1;
+        let identity = format!("browser-{}", self.invites);
+        match session::viewer_token(&profile.api_key, &secret, &room, &identity) {
+            Ok(token) => Some(viewer.link(&profile.connect_url(), &token, self.browser_adaptive)),
+            Err(e) => {
+                self.invite_note = format!("Could not create a token: {e:#}");
+                None
+            }
+        }
+    }
+
+    fn invite(&mut self, browser: Option<&str>) {
+        let Some(link) = self.invite_link() else {
+            return;
+        };
+        self.invite_note = match crate::viewer::open_url(&link, browser) {
+            Ok(()) => {
+                "Viewer opened. Its stats appear in Stats & Telemetry within a few seconds.".into()
+            }
+            Err(_) if browser.is_some() => match crate::viewer::open_url(&link, None) {
+                Ok(()) => "Chrome was not found; opened the default browser instead.".into(),
+                Err(e) => format!("Could not open a browser ({e}). Use Copy link."),
+            },
+            Err(e) => format!("Could not open a browser ({e}). Use Copy link."),
+        };
+    }
+
+    // ---- Top bar and status line
+
+    fn top_bar(&mut self, ui: &mut egui::Ui) {
+        let phase = self.session.phase();
+        let profile = self.current_profile();
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            ui.label(
+                RichText::new(version::APP_NAME)
+                    .strong()
+                    .size(15.0)
+                    .color(theme::TEXT),
+            );
+            ui.add_space(4.0);
+
+            // Profile: one segment per profile, like the mockup's Local dev / LiveKit Cloud.
+            let mut chosen = None;
+            widgets::segments(ui, |ui| {
+                for p in &self.store.profiles {
+                    let on = p.id == self.profile_id;
+                    if widgets::segment(ui, &p.name, on, theme::ACCENT_BG, theme::TEXT)
+                        .on_hover_text("Switching profile disconnects first.")
+                        .clicked()
+                    {
+                        chosen = Some(p.id.clone());
+                    }
+                }
+            });
+            if let Some(id) = chosen {
+                self.switch_profile(id);
+            }
+            let (dot, dot_color) = if profile.is_local() {
+                match self.server.state() {
+                    ServerState::Running | ServerState::External => {
+                        ("server running", theme::GREEN_TEXT)
+                    }
+                    ServerState::Starting => ("server starting", theme::AMBER_TEXT),
+                    _ => ("server stopped", theme::RED),
+                }
+            } else {
+                ("remote", theme::MUTED)
+            };
+            ui.label(
+                RichText::new(format!("{} · ", profile.connect_url()))
+                    .monospace()
+                    .size(12.0)
+                    .color(theme::MUTED),
+            );
+            ui.label(RichText::new(dot).size(12.0).color(dot_color));
+            if ui.button("Edit profiles").clicked() {
+                self.show_profiles = true;
+                self.profile_editor.draft = None;
+                self.profile_editor.selected = self.profile_id.clone();
+            }
+            ui.label(RichText::new("Room").color(theme::MUTED));
+            ui.add_enabled(
+                phase == Phase::Disconnected,
+                egui::TextEdit::singleline(&mut self.room)
+                    .desired_width(100.0)
+                    .font(egui::TextStyle::Monospace),
+            );
+
+            // Phase: Disconnected / Connected / Publishing, the current one lit.
+            widgets::segments(ui, |ui| {
+                let busy = matches!(
+                    phase,
+                    Phase::Connecting | Phase::Unpublishing | Phase::Disconnecting
+                );
+                let label_for = |base: Phase, text: &'static str| -> String {
+                    if busy && phase_base(phase) == base {
+                        phase.label().to_string()
+                    } else {
+                        text.to_string()
+                    }
+                };
+                let base = phase_base(phase);
+                widgets::segment(
+                    ui,
+                    &label_for(Phase::Disconnected, "Disconnected"),
+                    base == Phase::Disconnected,
+                    theme::RAISED,
+                    theme::TEXT,
+                );
+                widgets::segment(
+                    ui,
+                    &label_for(Phase::Connected, "Connected"),
+                    base == Phase::Connected,
+                    theme::ACCENT,
+                    theme::BG,
+                );
+                widgets::segment(
+                    ui,
+                    &label_for(Phase::Publishing, "Publishing"),
+                    base == Phase::Publishing,
+                    theme::GREEN,
+                    theme::BG,
+                );
+            });
+
+            let connect_label = "Connect";
+            if ui
+                .add_enabled(
+                    phase == Phase::Disconnected,
+                    widgets::accent_button(connect_label),
+                )
+                .on_hover_text(if self.auto_publish {
+                    "Connects and publishes (Auto-publish is on)."
+                } else {
+                    "Connects without publishing."
+                })
+                .clicked()
+            {
+                self.connect();
+            }
+            if ui
+                .add_enabled(phase == Phase::Connected, widgets::accent_button("Publish"))
+                .clicked()
+            {
+                self.publish_or_republish(false);
+            }
+            if ui
+                .add_enabled(
+                    phase == Phase::Publishing,
+                    widgets::warn_button("Unpublish"),
+                )
+                .clicked()
+            {
+                self.session.unpublish();
+            }
+            let can_disconnect = matches!(
+                phase,
+                Phase::Connecting | Phase::Connected | Phase::Publishing
+            );
+            if ui
+                .add_enabled(can_disconnect, egui::Button::new("Disconnect"))
+                .clicked()
+            {
+                self.session.disconnect();
+            }
+            ui.checkbox(&mut self.auto_publish, "Auto-publish on connect");
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button(RichText::new("i").strong())
+                    .on_hover_text("About")
+                    .clicked()
+                {
+                    self.show_about = true;
+                }
+                if ui
+                    .add(widgets::toggle_button("Stats & Telemetry", self.show_stats))
+                    .clicked()
+                {
+                    self.show_stats = !self.show_stats;
+                }
+                if ui
+                    .add(widgets::toggle_button("Host capabilities", self.show_caps))
+                    .clicked()
+                {
+                    self.show_caps = !self.show_caps;
+                }
+            });
+        });
+    }
+
+    fn status_line(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            let profile = self.current_profile();
+            if profile.is_local() {
+                let st = self.server.stats();
+                let (text, color) = match self.server.state() {
+                    ServerState::Running => (
+                        format!(
+                            "Local server running · {} · CPU {} · {} room{}",
+                            if st.version.is_empty() {
+                                "livekit-server".to_string()
+                            } else {
+                                format!("v{}", st.version)
+                            },
+                            st.cpu_percent
+                                .map(|c| format!("{c:.0}%"))
+                                .unwrap_or_else(|| "–".into()),
+                            st.rooms.unwrap_or(0),
+                            if st.rooms == Some(1) { "" } else { "s" }
+                        ),
+                        widgets::green(ui),
+                    ),
+                    ServerState::External => (
+                        "Using a server already running on the port".into(),
+                        widgets::amber(ui),
+                    ),
+                    ServerState::Starting => ("Local server starting…".into(), widgets::amber(ui)),
+                    ServerState::Stopped => ("Local server stopped".into(), widgets::weak(ui)),
+                    ServerState::Failed(e) => {
+                        (format!("Local server failed: {e}"), widgets::red(ui))
+                    }
+                };
+                ui.colored_label(color, text);
+                self.server_buttons(ui);
+                if ui.small_button("Server stats").clicked() {
+                    self.show_stats = true;
+                    self.stats_ui.tab = stats_window::StatsTab::Server;
+                }
+                ui.separator();
+            }
+            if let Some((text, at)) = &self.notice {
+                if at.elapsed() < Duration::from_secs(12) {
+                    ui.colored_label(widgets::amber(ui), text);
+                } else {
+                    self.notice = None;
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "LiveKit Rust SDK {} · v{}",
+                        version::LIVEKIT_SDK,
+                        version::APP_VERSION
+                    ))
+                    .small()
+                    .color(widgets::weak(ui)),
+                );
+            });
+        });
+    }
+
+    fn shutdown(&mut self) {
+        self.session.disconnect();
+        // Give the engine a moment to leave the rooms cleanly.
+        let started = Instant::now();
+        let closing = self.session.shared.lock().closing.clone();
+        while (self.session.phase() != Phase::Disconnected
+            || closing.load(std::sync::atomic::Ordering::SeqCst) > 0)
+            && started.elapsed() < Duration::from_secs(3)
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        self.server.kill_now();
+        self.viewer = None;
+    }
+}
+
+/// The resting state a transitional phase belongs to, for the phase indicator.
+fn phase_base(p: Phase) -> Phase {
+    match p {
+        Phase::Connecting | Phase::Disconnected => Phase::Disconnected,
+        Phase::Unpublishing | Phase::Connected => Phase::Connected,
+        Phase::Disconnecting => Phase::Disconnected,
+        Phase::Publishing => Phase::Publishing,
+    }
+}
+
+impl eframe::App for App {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        egui::Panel::top("top")
+            .frame(theme::top_frame())
+            .show(ui, |ui| {
+                self.top_bar(ui);
+            });
+        egui::Panel::bottom("status")
+            .frame(theme::status_frame())
+            .show(ui, |ui| {
+                self.status_line(ui);
+            });
+        egui::Panel::left("settings")
+            .frame(theme::sidebar_frame())
+            .default_size(400.0)
+            .resizable(true)
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink(false)
+                    .show(ui, |ui| self.settings_ui(ui));
+            });
+        egui::CentralPanel::default_margins()
+            .frame(theme::central_frame())
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink(false)
+                    .show(ui, |ui| self.pipeline_ui(ui));
+            });
+
+        // A pending trailing size request still has to go out when the tile stops changing.
+        if self.ask_optimal && self.session.phase().connected() {
+            if let Some(size) = self.throttle.poll(Instant::now()) {
+                self.session.request_size(Some(size));
+            }
+        }
+        if self.show_caps {
+            self.capabilities_window(&ctx);
+        }
+        if self.show_profiles {
+            self.profiles_window(&ctx);
+        }
+        if self.show_about {
+            self.about_window(&ctx);
+        }
+        self.preview_windows(&ctx);
+        self.stats_window(&ctx);
+
+        // WB_AUTOCONNECT=1 connects (and publishes) once at start-up: for demos and checks.
+        if self.autoconnect_pending && self.server.is_usable() {
+            self.autoconnect_pending = false;
+            self.connect();
+        }
+        // Previews wake the UI on each new frame; this keeps numbers and states fresh.
+        let busy = self.session.phase() != Phase::Disconnected
+            || matches!(self.server.state(), ServerState::Starting);
+        ctx.request_repaint_after(Duration::from_millis(if busy { 250 } else { 1000 }));
+    }
+
+    fn on_exit(&mut self) {
+        self.shutdown();
+    }
+}

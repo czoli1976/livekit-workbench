@@ -1,0 +1,9 @@
+Workbench for LiveKit
+Copyright 2026 czoli1976
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It builds on the LiveKit Rust SDK (Apache 2.0, https://github.com/livekit/rust-sdks),
+which bundles a prebuilt WebRTC (BSD-style licence, https://webrtc.org/support/license),
+and on egui/eframe (MIT or Apache 2.0, https://github.com/emilk/egui).
+The browser viewer page loads the LiveKit JavaScript SDK (Apache 2.0) from jsDelivr.

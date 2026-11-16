@@ -1,0 +1,394 @@
+//! Video sources: cameras (through nokhwa) and two synthetic generators.
+//!
+//! Every source produces I420 frames at the requested rate and hands them to a
+//! callback; the session scales them to the publish size and feeds the SDK.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+use anyhow::{anyhow, Result};
+use livekit::webrtc::native::yuv_helper;
+use livekit::webrtc::video_frame::I420Buffer;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum SourceKind {
+    /// Index into the camera list.
+    Camera(u32),
+    /// A texture that scrolls sideways: cheap to encode, needs little bitrate.
+    Pattern,
+    /// The pattern plus grain that changes every frame: needs a realistic bitrate.
+    Detail,
+}
+
+impl SourceKind {
+    pub fn label(&self) -> String {
+        match self {
+            SourceKind::Camera(i) => format!("camera {i}"),
+            SourceKind::Pattern => "synthetic pattern".into(),
+            SourceKind::Detail => "synthetic detailed motion".into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CameraDesc {
+    pub index: u32,
+    pub name: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CameraFormat {
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+}
+
+/// What the capture side actually got (it can differ from what was asked).
+#[derive(Clone, Debug, Default)]
+pub struct CaptureInfo {
+    pub width: u32,
+    pub height: u32,
+    pub note: String,
+}
+
+/// Ask the OS for camera access (macOS shows its permission prompt here).
+pub fn init_camera_access() {
+    #[cfg(target_os = "macos")]
+    nokhwa::nokhwa_initialize(|granted| {
+        if !granted {
+            log::warn!("camera access was not granted; synthetic sources still work");
+        }
+    });
+}
+
+pub fn list_cameras() -> Result<Vec<CameraDesc>> {
+    use nokhwa::utils::{ApiBackend, CameraIndex};
+    let cams = nokhwa::query(ApiBackend::Auto).map_err(|e| anyhow!("{e}"))?;
+    Ok(cams
+        .iter()
+        .enumerate()
+        .map(|(i, c)| CameraDesc {
+            index: match c.index() {
+                CameraIndex::Index(n) => *n,
+                _ => i as u32,
+            },
+            name: c.human_name(),
+        })
+        .collect())
+}
+
+/// Formats the camera advertises, largest first, one entry per size and rate.
+pub fn camera_formats(index: u32) -> Result<Vec<CameraFormat>> {
+    use nokhwa::pixel_format::RgbAFormat;
+    use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
+    let mut cam = nokhwa::Camera::new(
+        CameraIndex::Index(index),
+        RequestedFormat::new::<RgbAFormat>(RequestedFormatType::AbsoluteHighestResolution),
+    )
+    .map_err(|e| anyhow!("{e}"))?;
+    let mut out: Vec<CameraFormat> = cam
+        .compatible_camera_formats()
+        .map_err(|e| anyhow!("{e}"))?
+        .iter()
+        .map(|f| CameraFormat {
+            width: f.width(),
+            height: f.height(),
+            fps: f.frame_rate(),
+        })
+        .collect();
+    out.sort_by_key(|f| std::cmp::Reverse((f.width * f.height, f.fps)));
+    out.dedup();
+    Ok(out)
+}
+
+/// Run a source until `stop` is set. `on_frame` receives each captured frame.
+pub fn run(
+    source: &SourceKind,
+    width: u32,
+    height: u32,
+    fps: u32,
+    stop: &AtomicBool,
+    on_info: impl FnOnce(CaptureInfo),
+    on_frame: impl FnMut(I420Buffer),
+) -> Result<()> {
+    match source {
+        SourceKind::Camera(index) => {
+            run_camera(*index, width, height, fps, stop, on_info, on_frame)
+        }
+        SourceKind::Pattern | SourceKind::Detail => {
+            let detail = *source == SourceKind::Detail;
+            on_info(CaptureInfo {
+                width,
+                height,
+                note: source.label(),
+            });
+            run_synthetic(width, height, fps, detail, stop, on_frame);
+            Ok(())
+        }
+    }
+}
+
+fn run_synthetic(
+    width: u32,
+    height: u32,
+    fps: u32,
+    detail: bool,
+    stop: &AtomicBool,
+    mut on_frame: impl FnMut(I420Buffer),
+) {
+    let mut gen = Synthetic::new(width, height, detail);
+    let interval = Duration::from_secs_f64(1.0 / fps.max(1) as f64);
+    let mut next = Instant::now();
+    while !stop.load(Ordering::SeqCst) {
+        on_frame(gen.next_frame());
+        next += interval;
+        let now = Instant::now();
+        if next > now {
+            std::thread::sleep(next - now);
+        } else {
+            next = now; // the generator cannot keep up; do not build up a debt
+        }
+    }
+}
+
+fn run_camera(
+    index: u32,
+    width: u32,
+    height: u32,
+    fps: u32,
+    stop: &AtomicBool,
+    on_info: impl FnOnce(CaptureInfo),
+    mut on_frame: impl FnMut(I420Buffer),
+) -> Result<()> {
+    use nokhwa::pixel_format::RgbAFormat;
+    use nokhwa::utils::{
+        CameraFormat as NkFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType,
+        Resolution,
+    };
+
+    let mut cam = nokhwa::Camera::new(
+        CameraIndex::Index(index),
+        RequestedFormat::new::<RgbAFormat>(RequestedFormatType::AbsoluteHighestFrameRate),
+    )
+    .map_err(|e| anyhow!("opening the camera: {e}"))?;
+
+    // Prefer formats that convert to I420 without a colour-space round trip.
+    let mut chosen = false;
+    for ff in [
+        FrameFormat::NV12,
+        FrameFormat::YUYV,
+        FrameFormat::MJPEG,
+        FrameFormat::RAWRGB,
+    ] {
+        let wanted = NkFormat::new(Resolution::new(width, height), ff, fps);
+        if cam
+            .set_camera_requset(RequestedFormat::new::<RgbAFormat>(
+                RequestedFormatType::Exact(wanted),
+            ))
+            .is_ok()
+        {
+            chosen = true;
+            break;
+        }
+    }
+    if !chosen {
+        let _ = cam.set_camera_requset(RequestedFormat::new::<RgbAFormat>(
+            RequestedFormatType::Closest(NkFormat::new(
+                Resolution::new(width, height),
+                FrameFormat::NV12,
+                fps,
+            )),
+        ));
+    }
+    cam.open_stream()
+        .map_err(|e| anyhow!("starting the camera: {e}"))?;
+    let fmt = cam.camera_format();
+    on_info(CaptureInfo {
+        width: fmt.width(),
+        height: fmt.height(),
+        note: format!("camera · {} · {} fps", fmt.format(), fmt.frame_rate()),
+    });
+
+    while !stop.load(Ordering::SeqCst) {
+        let frame = cam
+            .frame()
+            .map_err(|e| anyhow!("reading a camera frame: {e}"))?;
+        let res = frame.resolution();
+        let (w, h) = (res.width(), res.height());
+        let raw = frame.buffer();
+        let buf = match frame.source_frame_format() {
+            FrameFormat::NV12 if raw.len() >= (w * h * 3 / 2) as usize => nv12_to_i420(raw, w, h),
+            FrameFormat::YUYV if raw.len() >= (w * h * 2) as usize => yuyv_to_i420(raw, w, h),
+            _ => {
+                let rgba = frame
+                    .decode_image::<RgbAFormat>()
+                    .map_err(|e| anyhow!("decoding: {e}"))?;
+                let (w, h) = (rgba.width(), rgba.height());
+                let mut buf = I420Buffer::new(w, h);
+                let (sy, su, sv) = buf.strides();
+                let (y, u, v) = buf.data_mut();
+                // Bytes are R,G,B,A in memory, which libyuv calls "ABGR".
+                yuv_helper::abgr_to_i420(
+                    rgba.as_raw(),
+                    w * 4,
+                    y,
+                    sy,
+                    u,
+                    su,
+                    v,
+                    sv,
+                    w as i32,
+                    h as i32,
+                );
+                buf
+            }
+        };
+        on_frame(buf);
+    }
+    let _ = cam.stop_stream();
+    Ok(())
+}
+
+fn nv12_to_i420(raw: &[u8], w: u32, h: u32) -> I420Buffer {
+    let mut buf = I420Buffer::new(w, h);
+    let (sy, su, sv) = buf.strides();
+    let (y, u, v) = buf.data_mut();
+    let (src_y, src_uv) = raw.split_at((w * h) as usize);
+    yuv_helper::nv12_to_i420(src_y, w, src_uv, w, y, sy, u, su, v, sv, w as i32, h as i32);
+    buf
+}
+
+/// YUYV (Y0 U Y1 V) to I420, taking chroma from even rows.
+fn yuyv_to_i420(raw: &[u8], w: u32, h: u32) -> I420Buffer {
+    let mut buf = I420Buffer::new(w, h);
+    let (sy, su, sv) = buf.strides();
+    let (sy, su, sv) = (sy as usize, su as usize, sv as usize);
+    let (wu, hu) = (w as usize, h as usize);
+    let (y, u, v) = buf.data_mut();
+    for row in 0..hu {
+        let src = &raw[row * wu * 2..(row + 1) * wu * 2];
+        let dst = &mut y[row * sy..row * sy + wu];
+        for x in 0..wu {
+            dst[x] = src[x * 2];
+        }
+        if row % 2 == 0 {
+            let cr = row / 2;
+            for x in 0..wu / 2 {
+                u[cr * su + x] = src[x * 4 + 1];
+                v[cr * sv + x] = src[x * 4 + 3];
+            }
+        }
+    }
+    buf
+}
+
+/// Synthetic I420 source. The picture scrolls sideways, so every frame differs.
+struct Synthetic {
+    w: u32,
+    h: u32,
+    /// Luma planes to cycle through: one for the pattern, several for detail.
+    frames: Vec<Vec<u8>>,
+    n: u64,
+}
+
+/// Peak-to-peak strength of the per-frame grain, in luma steps.
+const DETAIL_GRAIN: u32 = 12;
+/// Distinct grain fields; consecutive frames never share one.
+const DETAIL_FRAMES: usize = 4;
+
+impl Synthetic {
+    fn new(w: u32, h: u32, detail: bool) -> Self {
+        let (wu, hu) = (w as usize, h as usize);
+        let mut rng = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        let mut base = vec![0u8; wu * hu];
+        for yy in 0..hu {
+            let row = &mut base[yy * wu..(yy + 1) * wu];
+            for (xx, px) in row.iter_mut().enumerate() {
+                let grad = ((xx + yy) / 4) as u32 & 0xFF;
+                let block = if ((xx / 64) + (yy / 64)) % 2 == 0 {
+                    40
+                } else {
+                    0
+                };
+                let grain = (next() & 0x0F) as u32;
+                *px = ((grad / 2 + block + grain + 16).min(220)) as u8;
+            }
+        }
+        let frames = if detail {
+            (0..DETAIL_FRAMES)
+                .map(|_| {
+                    let mut f = base.clone();
+                    for chunk in f.chunks_mut(8) {
+                        let mut r = next();
+                        for px in chunk {
+                            *px = px.saturating_add(((r & 0xFF) as u32 * DETAIL_GRAIN / 256) as u8);
+                            r >>= 8;
+                        }
+                    }
+                    f
+                })
+                .collect()
+        } else {
+            vec![base]
+        };
+        Self { w, h, frames, n: 0 }
+    }
+
+    fn next_frame(&mut self) -> I420Buffer {
+        let (wu, hu) = (self.w as usize, self.h as usize);
+        let mut buf = I420Buffer::new(self.w, self.h);
+        let (sy, su, sv) = buf.strides();
+        let (sy, su, sv) = (sy as usize, su as usize, sv as usize);
+        let (cw, chh) = (wu.div_ceil(2), hu.div_ceil(2));
+        let (y, u, v) = buf.data_mut();
+        let src_frame = &self.frames[(self.n as usize) % self.frames.len()];
+        let shift = (self.n as usize * 8) % wu.max(1);
+        for r in 0..hu {
+            let src = &src_frame[r * wu..(r + 1) * wu];
+            let dst = &mut y[r * sy..r * sy + wu];
+            dst[..wu - shift].copy_from_slice(&src[shift..]);
+            dst[wu - shift..].copy_from_slice(&src[..shift]);
+        }
+        let phase = (self.n % 256) as u8;
+        for r in 0..chh {
+            u[r * su..r * su + cw].fill(96u8.wrapping_add(phase / 4));
+            v[r * sv..r * sv + cw].fill(160u8.wrapping_sub(phase / 4));
+        }
+        self.n += 1;
+        buf
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use livekit::webrtc::video_frame::VideoBuffer;
+
+    #[test]
+    fn synthetic_frames_have_the_requested_size_and_change() {
+        let mut g = Synthetic::new(64, 36, true);
+        let a = g.next_frame();
+        let b = g.next_frame();
+        assert_eq!((a.width(), a.height()), (64, 36));
+        assert_ne!(a.data().0, b.data().0, "consecutive frames differ");
+    }
+
+    #[test]
+    fn yuyv_conversion_keeps_luma() {
+        // 2x2 YUYV: Y0 U Y1 V per pair of pixels.
+        let raw = [10u8, 100, 20, 200, 30, 110, 40, 210];
+        let buf = yuyv_to_i420(&raw, 2, 2);
+        let (y, u, v) = buf.data();
+        let (sy, _, _) = buf.strides();
+        assert_eq!(&y[0..2], &[10, 20]);
+        assert_eq!(&y[sy as usize..sy as usize + 2], &[30, 40]);
+        assert_eq!(u[0], 100);
+        assert_eq!(v[0], 200);
+    }
+}

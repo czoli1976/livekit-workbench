@@ -1,0 +1,423 @@
+//! The stats model shown in the main window and the Stats & Telemetry window,
+//! and the code that turns raw WebRTC stats into it.
+
+use std::collections::{BTreeMap, VecDeque};
+
+use livekit::webrtc::stats::RtcStats;
+
+use crate::health::PipelineHealth;
+
+/// Seconds of history kept for the charts.
+pub const HISTORY: usize = 120;
+
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct CaptureStats {
+    pub width: u32,
+    pub height: u32,
+    pub fps: f64,
+    pub note: String,
+}
+
+/// One sent RTP stream: a simulcast layer, or the single stream (SVC included).
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct LayerRow {
+    pub rid: String,
+    pub active: bool,
+    pub target_w: u32,
+    pub target_h: u32,
+    pub width: u32,
+    pub height: u32,
+    pub target_fps: f64,
+    pub fps: f64,
+    /// Maximum allowed bitrate for this layer (the per-layer cap).
+    pub max_mbps: f64,
+    /// What WebRTC's rate control currently allows.
+    pub target_mbps: f64,
+    pub sent_mbps: f64,
+    pub encoder: String,
+    pub hardware: bool,
+    pub encode_ms: f64,
+    pub qp: f64,
+    pub limit: String,
+    pub limit_share_bandwidth: f64,
+    pub limit_share_cpu: f64,
+    pub limit_share_other: f64,
+    pub resolution_changes: u32,
+    pub keyframes: u32,
+    pub pli: u32,
+    pub nack: u32,
+    pub scalability_mode: String,
+    pub codec: String,
+}
+
+impl LayerRow {
+    pub fn label(&self) -> &'static str {
+        match self.rid.as_str() {
+            "f" => "full",
+            "h" => "half",
+            "q" => "quarter",
+            _ => "single",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct ReceiveRow {
+    pub who: String,
+    pub is_browser: bool,
+    pub width: u32,
+    pub height: u32,
+    pub fps: f64,
+    pub mbps: f64,
+    pub codec: String,
+    pub decoder: String,
+    pub hardware: Option<bool>,
+    pub decode_ms: f64,
+    pub jitter_buffer_ms: f64,
+    pub freezes: u32,
+    pub freeze_s: f64,
+    pub lost: i64,
+    pub loss_ratio: f64,
+    pub nack: u32,
+    pub pli: u32,
+    pub fec_recovered: u64,
+    pub user_agent: String,
+    /// Size this receiver asked the SFU for, when it asks.
+    pub requested: Option<(u32, u32)>,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct TransportStats {
+    pub local_candidate: String,
+    pub remote_candidate: String,
+    pub rtt_ms: f64,
+    pub available_out_mbps: f64,
+    pub dtls: String,
+    pub srtp: String,
+    pub pair_changes: u32,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct History {
+    pub cap: VecDeque<f32>,
+    pub target: VecDeque<f32>,
+    pub sent: VecDeque<f32>,
+    pub received: VecDeque<f32>,
+    pub capture_h: VecDeque<f32>,
+    pub encoded_h: VecDeque<f32>,
+    pub decoded_h: VecDeque<f32>,
+    pub capture_fps: VecDeque<f32>,
+    pub encode_fps: VecDeque<f32>,
+    pub sent_fps: VecDeque<f32>,
+    pub decode_fps: VecDeque<f32>,
+    pub layer_sent: BTreeMap<String, VecDeque<f32>>,
+}
+
+pub fn push(h: &mut VecDeque<f32>, v: f64) {
+    h.push_back(v as f32);
+    while h.len() > HISTORY {
+        h.pop_front();
+    }
+}
+
+/// Everything the UI shows, refreshed once a second.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct Snapshot {
+    pub capture: CaptureStats,
+    pub layers: Vec<LayerRow>,
+    pub total_sent_mbps: f64,
+    pub total_max_mbps: f64,
+    pub total_target_mbps: f64,
+    pub retransmit_mbps: f64,
+    pub send_codec: String,
+    pub receive: Vec<ReceiveRow>,
+    pub transport: TransportStats,
+    pub health: PipelineHealth,
+    /// Tile size last sent with "Ask optimal resolution".
+    pub requested_size: Option<(u32, u32)>,
+    pub requested_ago_s: Option<f64>,
+    pub fec_negotiated: bool,
+    /// Increments on every sample, so viewers can tell a new one arrived.
+    pub seq: u64,
+    pub history: History,
+    pub events: VecDeque<(String, String)>,
+}
+
+impl Snapshot {
+    pub fn top_layer(&self) -> Option<&LayerRow> {
+        self.layers
+            .iter()
+            .filter(|l| l.active)
+            .max_by_key(|l| l.width * l.height)
+    }
+    pub fn self_receive(&self) -> Option<&ReceiveRow> {
+        self.receive.iter().find(|r| !r.is_browser)
+    }
+    pub fn event(&mut self, text: impl Into<String>) {
+        let ts = chrono_like_now();
+        self.events.push_front((ts, text.into()));
+        while self.events.len() > 200 {
+            self.events.pop_back();
+        }
+    }
+}
+
+/// HH:MM:SS of local wall time without pulling in a date crate.
+fn chrono_like_now() -> String {
+    chrono::Local::now().format("%H:%M:%S").to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Raw counters, kept between samples to compute rates
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct RawOut {
+    pub rid: String,
+    pub active: bool,
+    pub bytes: u64,
+    pub retrans_bytes: u64,
+    pub frames_encoded: u32,
+    pub frames_sent: u32,
+    pub encode_time: f64,
+    pub qp_sum: u64,
+    pub width: u32,
+    pub height: u32,
+    pub target_bps: f64,
+    pub encoder: String,
+    pub hardware: bool,
+    pub limit: String,
+    pub limit_durations: (f64, f64, f64),
+    pub resolution_changes: u32,
+    pub keyframes: u32,
+    pub pli: u32,
+    pub nack: u32,
+    pub scalability_mode: String,
+    pub codec: String,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct RawIn {
+    pub bytes: u64,
+    pub packets: u64,
+    pub lost: i64,
+    pub frames_decoded: u32,
+    pub decode_time: f64,
+    pub width: u32,
+    pub height: u32,
+    pub decoder: String,
+    pub hardware: bool,
+    pub codec: String,
+    pub jitter_delay: f64,
+    pub jitter_emitted: u64,
+    pub freezes: u32,
+    pub freeze_s: f64,
+    pub nack: u32,
+    pub pli: u32,
+    pub fec: u64,
+}
+
+/// "H265" or "H264 (profile-level-id=42e01f)" for a stream's codec id.
+pub fn codec_label(stats: &[RtcStats], codec_id: &str) -> String {
+    for s in stats {
+        let RtcStats::Codec(c) = s else { continue };
+        if c.rtc.id != codec_id {
+            continue;
+        }
+        let name = c
+            .codec
+            .mime_type
+            .rsplit('/')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        let profile = c
+            .codec
+            .sdp_fmtp_line
+            .split(';')
+            .map(str::trim)
+            .find(|kv| {
+                kv.starts_with("profile-id=")
+                    || kv.starts_with("profile-level-id=")
+                    || kv.starts_with("profile=")
+            })
+            .map(|kv| kv.to_string());
+        return match profile {
+            Some(p) => format!("{name} ({p})"),
+            None => name,
+        };
+    }
+    String::new()
+}
+
+pub fn has_flexfec(stats: &[RtcStats]) -> bool {
+    stats.iter().any(|s| matches!(s, RtcStats::Codec(c) if c.codec.mime_type.to_ascii_lowercase().contains("flexfec")))
+}
+
+pub fn outbound(stats: &[RtcStats]) -> Vec<RawOut> {
+    let mut out = Vec::new();
+    for s in stats {
+        let RtcStats::OutboundRtp(o) = s else {
+            continue;
+        };
+        if o.stream.kind != "video" {
+            continue;
+        }
+        let d = &o.outbound.quality_limitation_durations;
+        out.push(RawOut {
+            rid: o.outbound.rid.clone(),
+            active: o.outbound.active,
+            bytes: o.sent.bytes_sent,
+            retrans_bytes: o.outbound.retransmitted_bytes_sent,
+            frames_encoded: o.outbound.frames_encoded,
+            frames_sent: o.outbound.frames_sent,
+            encode_time: o.outbound.total_encode_time,
+            qp_sum: o.outbound.qp_sum,
+            width: o.outbound.frame_width,
+            height: o.outbound.frame_height,
+            target_bps: o.outbound.target_bitrate,
+            encoder: o.outbound.encoder_implementation.clone(),
+            hardware: o.outbound.power_efficient_encoder,
+            limit: format!("{:?}", o.outbound.quality_limitation_reason),
+            limit_durations: (
+                d.get("bandwidth").copied().unwrap_or(0.0),
+                d.get("cpu").copied().unwrap_or(0.0),
+                d.get("other").copied().unwrap_or(0.0),
+            ),
+            resolution_changes: o.outbound.quality_limitation_resolution_changes,
+            keyframes: o.outbound.key_frames_encoded,
+            pli: o.outbound.pli_count,
+            nack: o.outbound.nack_count,
+            scalability_mode: o.outbound.scalibility_mode.clone(),
+            codec: codec_label(stats, &o.stream.codec_id),
+        });
+    }
+    out.sort_by(|a, b| a.rid.cmp(&b.rid));
+    out
+}
+
+pub fn inbound(stats: &[RtcStats]) -> Option<RawIn> {
+    stats.iter().find_map(|s| {
+        let RtcStats::InboundRtp(i) = s else {
+            return None;
+        };
+        if i.stream.kind != "video" {
+            return None;
+        }
+        Some(RawIn {
+            bytes: i.inbound.bytes_received,
+            packets: i.received.packets_received,
+            lost: i.received.packets_lost,
+            frames_decoded: i.inbound.frames_decoded,
+            decode_time: i.inbound.total_decode_time,
+            width: i.inbound.frame_width,
+            height: i.inbound.frame_height,
+            decoder: i.inbound.decoder_implementation.clone(),
+            // Native decoders built on platform APIs do not always set the
+            // power-efficient flag; their names say what they are.
+            hardware: i.inbound.power_efficient_decoder
+                || is_platform_codec(&i.inbound.decoder_implementation),
+            codec: codec_label(stats, &i.stream.codec_id),
+            jitter_delay: i.inbound.jitter_buffer_delay,
+            jitter_emitted: i.inbound.jitter_buffer_emitted_count,
+            freezes: i.inbound.freeze_count,
+            freeze_s: i.inbound.total_freeze_duration,
+            nack: i.inbound.nack_count,
+            pli: i.inbound.pli_count,
+            fec: i.inbound.fec_packets_received,
+        })
+    })
+}
+
+pub fn transport(stats: &[RtcStats]) -> TransportStats {
+    let mut t = TransportStats::default();
+    let mut pair_id = String::new();
+    for s in stats {
+        if let RtcStats::Transport(tr) = s {
+            pair_id = tr.transport.selected_candidate_pair_id.clone();
+            t.dtls = tr.transport.tls_version.clone();
+            t.srtp = tr.transport.srtp_cipher.clone();
+            t.pair_changes = tr.transport.selected_candidate_pair_changes;
+        }
+    }
+    let mut local_id = String::new();
+    let mut remote_id = String::new();
+    for s in stats {
+        if let RtcStats::CandidatePair(p) = s {
+            if pair_id.is_empty() || p.rtc.id == pair_id {
+                t.rtt_ms = p.candidate_pair.current_round_trip_time * 1000.0;
+                t.available_out_mbps = p.candidate_pair.available_outgoing_bitrate / 1e6;
+                local_id = p.candidate_pair.local_candidate_id.clone();
+                remote_id = p.candidate_pair.remote_candidate_id.clone();
+                if !pair_id.is_empty() {
+                    break;
+                }
+            }
+        }
+    }
+    for s in stats {
+        match s {
+            RtcStats::LocalCandidate(c) if c.rtc.id == local_id => {
+                t.local_candidate = format!(
+                    "{:?}/{}",
+                    c.local_candidate.candidate_type, c.local_candidate.protocol
+                )
+                .to_lowercase();
+            }
+            RtcStats::RemoteCandidate(c) if c.rtc.id == remote_id => {
+                t.remote_candidate = format!(
+                    "{:?}/{}",
+                    c.remote_candidate.candidate_type, c.remote_candidate.protocol
+                )
+                .to_lowercase();
+            }
+            _ => {}
+        }
+    }
+    t
+}
+
+/// Rates between two raw samples `dt` seconds apart.
+/// Decoder or encoder names that are platform (hardware) implementations.
+pub fn is_platform_codec(name: &str) -> bool {
+    [
+        "VideoToolbox",
+        "MediaCodec",
+        "NVDEC",
+        "NVENC",
+        "VAAPI",
+        "MediaFoundation",
+        "D3D11",
+    ]
+    .iter()
+    .any(|n| name.contains(n))
+}
+
+pub fn rate_mbps(now: u64, before: u64, dt: f64) -> f64 {
+    now.saturating_sub(before) as f64 * 8.0 / dt.max(1e-3) / 1e6
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rates() {
+        assert!((rate_mbps(1_250_000, 0, 1.0) - 10.0).abs() < 1e-9);
+        assert_eq!(
+            rate_mbps(10, 30, 1.0),
+            0.0,
+            "counter resets never go negative"
+        );
+    }
+
+    #[test]
+    fn history_is_bounded() {
+        let mut h = VecDeque::new();
+        for i in 0..(HISTORY + 10) {
+            push(&mut h, i as f64);
+        }
+        assert_eq!(h.len(), HISTORY);
+        assert_eq!(h[0], 10.0);
+    }
+}
