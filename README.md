@@ -87,7 +87,7 @@ Headless mode publishes and receives without a window, prints one line of stats 
 ## Good to know
 
 - **SVC** is offered for VP9 and AV1 with a software encoder only. The SDK applies a scalability mode only for those codecs, and its hardware AV1 encoders advertise L1T1 only.
-- **On macOS, VideoToolbox encodes H.264 and H.265 only.** The SDK's VideoToolbox backend also lists VP8, VP9 and AV1, but those are its bundled software encoders. There is no software H.265 encoder in the SDK, so H.265 always uses hardware.
+- **On macOS, VideoToolbox encodes H.264 and H.265 only.** The SDK's backend named `VideoToolbox` is WebRTC's macOS encoder factory, which also offers VP8 and VP9 (libvpx) and AV1 (libaom) as software encoders; asking for hardware with those codecs still gets the software encoder. The app shows them as software only. There is no software H.265 encoder in the SDK, so H.265 always uses VideoToolbox.
 - **Video FEC** has no client switch in the SDK. The server enables FlexFEC for publisher to SFU (`rtc.flexfec.upstream_enabled`); the Local dev profile has an option for it.
 - **Bitrate ramps up.** WebRTC starts a camera track at no more than 1 Mbps and raises its estimate over about a minute. Publishing as *Screen share* starts near the cap.
 - **Disconnect returns at once.** On machines with network security software, closing WebRTC's sockets can take several seconds; the app finishes that in the background.
