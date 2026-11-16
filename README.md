@@ -86,6 +86,7 @@ Headless mode publishes and receives without a window, prints one line of stats 
 
 ## Good to know
 
+- **Simulcast** is offered for VP8, H.264 and H.265. With VP9 and AV1, WebRTC does not send separate streams for the simulcast request this SDK makes: VP9 becomes one stream with spatial layers and AV1 a single layer. Use SVC for those codecs, as LiveKit does.
 - **SVC** is offered for VP9 and AV1 with a software encoder only. The SDK applies a scalability mode only for those codecs, and its hardware AV1 encoders advertise L1T1 only.
 - **On macOS the SDK uses VideoToolbox for H.264 and H.265 only**, to encode and to decode. VP8 and VP9 use libvpx, and AV1 uses libaom to encode and dav1d to decode, even on Macs whose hardware can decode AV1 (M3 and later) or VP9. Asking for a hardware encoder with those codecs still gets the software one, so the app shows them as software only. Browser viewers such as Safari may use the hardware decoders; their rows in Stats show what the browser reports. There is no software H.265 encoder in the SDK, so H.265 always uses VideoToolbox.
 - **Video FEC** has no client switch in the SDK. The server enables FlexFEC for publisher to SFU (`rtc.flexfec.upstream_enabled`); the Local dev profile has an option for it.

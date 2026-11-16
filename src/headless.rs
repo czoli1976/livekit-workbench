@@ -78,6 +78,14 @@ fn line(s: &Session, sec: u64) -> (u32, f64) {
             }
         }
     }
+    if std::env::var("WB_LAYERS").is_ok() {
+        for l in &snap.layers {
+            println!(
+                "      layer rid={:?} active={} {}x{}@{:.1} target {}x{} sent {:.2} Mbps enc={} sm={:?}",
+                l.rid, l.active, l.width, l.height, l.fps, l.target_w, l.target_h, l.sent_mbps, l.encoder, l.scalability_mode
+            );
+        }
+    }
     for r in snap.receive.iter().filter(|r| r.is_browser) {
         println!(
             "      browser {} ({}): {}x{}@{:.1} {:.2} Mbps, asks for {:?}",

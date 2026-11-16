@@ -80,7 +80,12 @@ impl App {
                         } else {
                             ui.label(RichText::new("not applied by the SDK").color(widgets::weak(ui)));
                         }
-                        ui.label("yes");
+                        if crate::capabilities::codec_supports_simulcast(c.codec) {
+                            ui.label("yes");
+                        } else {
+                            ui.label(RichText::new("no, use SVC").color(widgets::weak(ui)))
+                                .on_hover_text("Measured: WebRTC turns a VP9 simulcast request into one stream with spatial layers, and sends AV1 as a single layer.");
+                        }
                         ui.end_row();
                     }
                 });

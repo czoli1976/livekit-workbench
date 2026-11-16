@@ -179,6 +179,21 @@ impl App {
         if self.caps.encoder_allowed(f.codec, f.encoder).is_err() {
             f.encoder = EncoderChoice::Auto;
         }
+        if f.layers == LayerKind::Simulcast
+            && !crate::capabilities::codec_supports_simulcast(f.codec)
+        {
+            // Switching to VP9 or AV1 with simulcast on: SVC is what those codecs use.
+            let svc_ok = self
+                .caps
+                .get(f.codec)
+                .map(|c| c.svc_with(f.encoder))
+                .unwrap_or(false);
+            f.layers = if svc_ok {
+                LayerKind::Svc
+            } else {
+                LayerKind::Single
+            };
+        }
         if f.layers == LayerKind::Svc {
             let ok = self
                 .caps
@@ -416,10 +431,20 @@ impl App {
             .unwrap_or(false);
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.form.layers, LayerKind::Single, "Single");
-            ui.selectable_value(&mut self.form.layers, LayerKind::Simulcast, "Simulcast")
-                .on_hover_text(
-                    "Up to three separate encodings (f, h, q) at full, half and quarter size.",
-                );
+            let sim_ok = crate::capabilities::codec_supports_simulcast(self.form.codec);
+            let resp = ui
+                .add_enabled(
+                    sim_ok,
+                    egui::Button::selectable(self.form.layers == LayerKind::Simulcast, "Simulcast"),
+                )
+                .on_hover_text("Up to three separate encodings (f, h, q) at full, half and quarter size.");
+            if resp.clicked() {
+                self.form.layers = LayerKind::Simulcast;
+            }
+            resp.on_disabled_hover_text(format!(
+                "Not for {}: with this SDK, WebRTC sends VP9 as one stream with spatial layers and AV1 as a single layer when simulcast is requested. LiveKit uses SVC for VP9 and AV1; choose SVC.",
+                codec_name(self.form.codec)
+            ));
             let resp = ui.add_enabled(
                 svc_ok,
                 egui::Button::selectable(self.form.layers == LayerKind::Svc, "SVC"),
@@ -606,6 +631,14 @@ impl App {
     pub(super) fn validate_form(&self) -> Result<PublishConfig, String> {
         let cfg = self.form.to_config();
         self.caps.encoder_allowed(cfg.codec, cfg.encoder)?;
+        if cfg.layering == Layering::Simulcast
+            && !crate::capabilities::codec_supports_simulcast(cfg.codec)
+        {
+            return Err(format!(
+                "Simulcast is not available for {}; use SVC.",
+                codec_name(cfg.codec)
+            ));
+        }
         if let Layering::Svc(_) = cfg.layering {
             if !self
                 .caps

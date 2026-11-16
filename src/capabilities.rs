@@ -78,6 +78,14 @@ pub fn codec_supports_svc(codec: VideoCodec) -> bool {
     matches!(codec, VideoCodec::VP9 | VideoCodec::AV1)
 }
 
+/// Simulcast gives separate streams only for VP8, H.264 and H.265. Measured:
+/// with three encodings and no scalability mode (which is what the SDK sends),
+/// WebRTC turns VP9 into one stream with spatial layers and sends AV1 as a
+/// single layer. LiveKit uses SVC for VP9 and AV1 instead.
+pub fn codec_supports_simulcast(codec: VideoCodec) -> bool {
+    !codec_supports_svc(codec)
+}
+
 pub fn codec_name(c: VideoCodec) -> &'static str {
     match c {
         VideoCodec::H265 => "H.265 / HEVC",
@@ -334,6 +342,15 @@ mod tests {
             hardware_codecs(VideoEncoderBackend::Nvenc, all.clone()).len(),
             5
         );
+    }
+
+    #[test]
+    fn simulcast_only_for_non_svc_codecs() {
+        assert!(codec_supports_simulcast(VideoCodec::VP8));
+        assert!(codec_supports_simulcast(VideoCodec::H264));
+        assert!(codec_supports_simulcast(VideoCodec::H265));
+        assert!(!codec_supports_simulcast(VideoCodec::VP9));
+        assert!(!codec_supports_simulcast(VideoCodec::AV1));
     }
 
     #[test]
