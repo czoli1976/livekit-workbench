@@ -62,6 +62,11 @@ pub struct HealthInput {
 
     pub encode_fps: f64,
     pub encode_ms_per_frame: f64,
+    /// Hardware encoders are pipelined: their encode time is latency, not load.
+    pub encoder_hardware: bool,
+    /// Top layer: what the encoder produces against what it was asked for.
+    pub encoded_height: u32,
+    pub target_height: u32,
     /// "None", "Cpu", "Bandwidth" or "Other" as WebRTC reports it.
     pub quality_limit: String,
     /// The user asked for hardware but a software encoder is in use, or the reverse.
@@ -153,13 +158,47 @@ fn encode(i: &HealthInput) -> Verdict {
             format!("Encoding {:.0}% of captured frames", r * 100.0),
         ));
     }
-    match i.quality_limit.as_str() {
-        "Cpu" => v = v.merge(Verdict::new(Health::Degraded, "Limited by CPU")),
-        "Bandwidth" => v = v.merge(Verdict::new(Health::Degraded, "Limited by bandwidth")),
-        "Other" => v = v.merge(Verdict::new(Health::Degraded, "Limited (other)")),
-        _ => {}
+
+    // WebRTC reports a limitation reason while it holds the output below
+    // target. It only matters to the viewer when something was actually cut.
+    let lowered_size =
+        i.target_height > 0 && i.encoded_height > 0 && i.encoded_height < i.target_height;
+    let lowered_rate = i.target_fps > 0.0 && i.encode_fps < i.target_fps * 0.9;
+    let why = match i.quality_limit.as_str() {
+        "Cpu" if i.encoder_hardware => Some(
+            "CPU (WebRTC's overuse detector, which for hardware encoders reacts to encode latency)",
+        ),
+        "Cpu" => Some("CPU"),
+        "Bandwidth" => Some("bandwidth"),
+        "Other" => Some("another reason"),
+        _ => None,
+    };
+    if let Some(why) = why {
+        if lowered_size {
+            v = v.merge(Verdict::new(
+                Health::Degraded,
+                format!(
+                    "WebRTC lowered the resolution to {}p (target {}p): limited by {why}",
+                    i.encoded_height, i.target_height
+                ),
+            ));
+        } else if lowered_rate {
+            v = v.merge(Verdict::new(
+                Health::Degraded,
+                format!(
+                    "WebRTC lowered the frame rate to {:.0} fps: limited by {why}",
+                    i.encode_fps
+                ),
+            ));
+        } else if v.health == Health::Good {
+            v.reason =
+                format!("Keeping up; WebRTC reports a {why} limit but the output is at target");
+        }
     }
-    if i.target_fps > 0.0 {
+
+    // A software encoder works on one frame at a time, so its encode time is
+    // its load. Hardware encoders pipeline frames: the same number is latency.
+    if !i.encoder_hardware && i.target_fps > 0.0 {
         let budget_ms = 1000.0 / i.target_fps;
         if i.encode_ms_per_frame > budget_ms * 0.8 {
             v = v.merge(Verdict::new(
@@ -275,6 +314,43 @@ fn receive(i: &HealthInput) -> Verdict {
 mod tests {
     use super::*;
 
+    fn steady(hw: bool) -> HealthInput {
+        HealthInput {
+            publishing: true,
+            target_fps: 30.0,
+            capture_fps: 30.0,
+            encode_fps: 30.0,
+            encoder_hardware: hw,
+            encoded_height: 1080,
+            target_height: 1080,
+            quality_limit: "None".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn hardware_latency_is_not_load() {
+        let mut i = steady(true);
+        i.encode_ms_per_frame = 100.0;
+        assert_eq!(encode(&i).health, Health::Good);
+        let mut s = steady(false);
+        s.encode_ms_per_frame = 100.0;
+        assert_eq!(encode(&s).health, Health::Degraded);
+    }
+
+    #[test]
+    fn limit_counts_only_when_output_is_cut() {
+        let mut i = steady(true);
+        i.quality_limit = "Cpu".into();
+        let v = encode(&i);
+        assert_eq!(v.health, Health::Good);
+        assert!(v.reason.contains("at target"));
+        i.encoded_height = 720;
+        let v = encode(&i);
+        assert_eq!(v.health, Health::Degraded);
+        assert!(v.reason.contains("720p"));
+    }
+
     fn healthy() -> HealthInput {
         HealthInput {
             publishing: true,
@@ -326,9 +402,11 @@ mod tests {
     fn encode_cpu_limit_is_amber_and_fallback_is_red() {
         let mut i = healthy();
         i.quality_limit = "Cpu".into();
+        i.target_height = 1080;
+        i.encoded_height = 540;
         let v = evaluate(&i).encode;
         assert_eq!(v.health, Health::Degraded);
-        assert_eq!(v.reason, "Limited by CPU");
+        assert!(v.reason.contains("limited by CPU"), "{}", v.reason);
         i.encoder_fallback = true;
         assert_eq!(evaluate(&i).encode.health, Health::Failing);
     }

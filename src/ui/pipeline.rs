@@ -368,7 +368,14 @@ impl App {
                         ui.label(big(format!("{:.1} fps", t.fps)));
                         ui.label(format!("{} · {}", or_dash(&t.encoder), hw(t.hardware)));
                         let limit = if t.limit.is_empty() || t.limit == "None" { "Not limited".to_string() } else { format!("Limited by {}", t.limit.to_lowercase()) };
-                        ui.label(RichText::new(format!("{limit} · {:.1} ms/frame", t.encode_ms)).small().color(weak));
+                        let time = if t.hardware {
+                            format!("{:.0} ms latency", t.encode_ms)
+                        } else {
+                            format!("{:.1} ms/frame", t.encode_ms)
+                        };
+                        ui.label(RichText::new(format!("{limit} · {time}")).small().color(weak)).on_hover_text(
+                            "WebRTC's encode time per frame. A hardware encoder pipelines several frames, so for it this is latency, not load.",
+                        );
                         if t.qp > 0.0 {
                             ui.label(RichText::new(format!("QP {:.0} · {}", t.qp, dims(t.width, t.height))).small().color(weak));
                         }
