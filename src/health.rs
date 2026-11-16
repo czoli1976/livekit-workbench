@@ -81,7 +81,6 @@ pub struct HealthInput {
     /// Height of the layer the subscriber asked for, if it asked; 0 = no request.
     pub requested_height: u32,
     pub received_height: u32,
-    pub subscription_paused: bool,
 
     pub sent_fps: f64,
     pub decode_fps: f64,
@@ -253,10 +252,12 @@ fn sfu(i: &HealthInput) -> Verdict {
     if !i.subscribed {
         return Verdict::new(Health::Unknown, "No subscriber");
     }
-    if i.subscription_paused {
-        return Verdict::new(Health::Failing, "Subscription paused");
-    }
-    if i.requested_height > 0 && i.received_height > 0 && i.received_height < i.requested_height {
+    // The SFU chooses from a ladder of layers (full, half, quarter), so it may
+    // round to the nearest; only a clearly smaller layer counts.
+    if i.requested_height > 0
+        && i.received_height > 0
+        && (i.received_height as f64) < i.requested_height as f64 * 0.75
+    {
         return Verdict::new(
             Health::Degraded,
             format!(
@@ -443,8 +444,12 @@ mod tests {
         i.requested_height = 1080;
         i.received_height = 540;
         assert_eq!(evaluate(&i).sfu.health, Health::Degraded);
-        i.subscription_paused = true;
-        assert_eq!(evaluate(&i).sfu.health, Health::Failing);
+        i.received_height = 900;
+        assert_eq!(
+            evaluate(&i).sfu.health,
+            Health::Good,
+            "near the ask is fine"
+        );
     }
 
     #[test]

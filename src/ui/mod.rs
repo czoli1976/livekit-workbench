@@ -17,14 +17,14 @@ use crate::capabilities::HostCaps;
 use crate::capture::{self, CameraDesc, CameraFormat, SourceKind};
 use crate::local_server::{LocalServer, ServerState};
 use crate::profiles::{LocalServerOptions, Profile, ProfileStore};
-use crate::session::{self, ConnectConfig, Phase, Session, VideoQuality};
+use crate::session::{self, ConnectConfig, Phase, Session};
 use crate::throttle::{SizeThrottle, DEFAULT_INTERVAL};
 use crate::version;
 use crate::viewer::ViewerServer;
 
 use dialogs::ProfileEditor;
 use form::PublishForm;
-use pipeline::{ChartMetric, PreviewLayout, PreviewPane};
+use pipeline::{ChartMetric, PreviewLayout, PreviewPane, SubAsk};
 use stats_window::StatsUi;
 
 pub struct App {
@@ -56,9 +56,11 @@ pub struct App {
     remote_undocked: bool,
     local_pane: PreviewPane,
     remote_pane: PreviewPane,
-    ask_optimal: bool,
+    /// What the app's subscriber asks the SFU for.
+    sub_ask: SubAsk,
+    /// The size last sent for Half/Quarter, to resend when the publish size changes.
+    ask_sent: Option<(u32, u32)>,
     throttle: SizeThrottle,
-    quality: VideoQuality,
 
     viewer: Option<ViewerServer>,
     invites: u32,
@@ -116,9 +118,9 @@ impl App {
             remote_undocked: false,
             local_pane: PreviewPane::default(),
             remote_pane: PreviewPane::default(),
-            ask_optimal: false,
+            sub_ask: SubAsk::Top,
+            ask_sent: None,
             throttle: SizeThrottle::new(DEFAULT_INTERVAL),
-            quality: VideoQuality::High,
             viewer: None,
             invites: 0,
             invite_note: String::new(),
@@ -358,7 +360,7 @@ impl App {
             decode: true,
             preview: self.previews,
         };
-        self.quality = VideoQuality::High;
+        self.ask_sent = None;
         self.throttle.reset();
         self.connection = Some((profile, secret));
         self.session.connect(cfg, publish);
@@ -712,12 +714,7 @@ impl eframe::App for App {
                     .show(ui, |ui| self.pipeline_ui(ui));
             });
 
-        // A pending trailing size request still has to go out when the tile stops changing.
-        if self.ask_optimal && self.session.phase().connected() {
-            if let Some(size) = self.throttle.poll(Instant::now()) {
-                self.session.request_size(Some(size));
-            }
-        }
+        self.keep_sub_ask();
         if self.show_caps {
             self.capabilities_window(&ctx);
         }

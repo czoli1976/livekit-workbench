@@ -16,7 +16,6 @@ use livekit::options::{
     compute_video_encodings, DegradationPreference, TrackPublishOptions, VideoCodec, VideoEncoding,
 };
 use livekit::prelude::*;
-pub use livekit::track::VideoQuality;
 use livekit::webrtc::native::yuv_helper;
 use livekit::webrtc::video_frame::{I420Buffer, VideoBuffer, VideoFrame, VideoRotation};
 use livekit::webrtc::video_source::native::NativeVideoSource;
@@ -149,7 +148,6 @@ enum Command {
     Disconnect,
     RequestSize(Option<(u32, u32)>),
     SwitchSource(PublishConfig),
-    SetQuality(VideoQuality),
 }
 
 /// The UI's handle to the engine.
@@ -194,10 +192,6 @@ impl Session {
     /// scaled to the size the track was published with.
     pub fn switch_source(&self, cfg: PublishConfig) {
         let _ = self.tx.send(Command::SwitchSource(cfg));
-    }
-    /// Pick the simulcast or SVC layer the subscriber receives.
-    pub fn set_quality(&self, q: VideoQuality) {
-        let _ = self.tx.send(Command::SetQuality(q));
     }
     pub fn phase(&self) -> Phase {
         self.shared.lock().phase
@@ -378,12 +372,6 @@ impl Engine {
             Command::Disconnect => self.disconnect().await,
             Command::RequestSize(size) => self.request_size(size),
             Command::SwitchSource(p) => self.switch_source(p).await,
-            Command::SetQuality(q) => {
-                if let Some(r) = self.conn.as_ref().and_then(|c| c.remote.as_ref()) {
-                    r.publication.set_video_quality(q);
-                    self.event(format!("Subscriber asked for the {q:?} layer"));
-                }
-            }
         }
     }
 
@@ -701,24 +689,15 @@ impl Engine {
         self.disconnect().await;
     }
 
+    /// Remember what the subscriber asks the SFU for and send it now if the
+    /// track is subscribed; it is sent again whenever the track is re-subscribed.
     fn request_size(&mut self, size: Option<(u32, u32)>) {
         let Some(conn) = self.conn.as_mut() else {
             return;
         };
-        let Some(remote) = conn.remote.as_ref() else {
-            return;
-        };
-        match size {
-            Some((w, h)) => {
-                remote
-                    .publication
-                    .update_video_dimensions(TrackDimension(w, h));
-                conn.requested = Some(((w, h), Instant::now()));
-            }
-            None => {
-                remote.publication.update_video_dimensions(remote.original);
-                conn.requested = None;
-            }
+        conn.requested = size.map(|s| (s, Instant::now()));
+        if let Some(remote) = conn.remote.as_ref() {
+            apply_request(remote, size);
         }
     }
 
@@ -771,7 +750,10 @@ impl Engine {
                     original,
                     consumer,
                 });
-                conn.requested = None;
+                if let (Some(r), Some((size, _))) = (conn.remote.as_ref(), conn.requested) {
+                    apply_request(r, Some(size));
+                    conn.requested = Some((size, Instant::now()));
+                }
                 self.event("Subscriber receiving the published video");
             }
             RoomEvent::TrackUnsubscribed {
@@ -1133,7 +1115,11 @@ impl Engine {
 
             // Health over a short window.
             if let Some(p) = &conn.published {
-                let requested_h = conn.requested.map(|((_, h), _)| h).unwrap_or(0);
+                // A tile larger than the video asks for more than exists: cap it.
+                let requested_h = conn
+                    .requested
+                    .map(|((_, h), _)| h.min(p.cfg.publish_dims().1))
+                    .unwrap_or(0);
                 let fallback = match (p.cfg.encoder, top.as_ref()) {
                     (EncoderChoice::Hardware, Some(t)) if !t.encoder.is_empty() => !t.hardware,
                     (EncoderChoice::Software, Some(t)) if !t.encoder.is_empty() => t.hardware,
@@ -1163,7 +1149,6 @@ impl Engine {
                     seconds_since_send: if total_sent > 0.0 || first { 0.0 } else { dt },
                     requested_height: requested_h,
                     received_height: me.as_ref().map(|r| r.height).unwrap_or(0),
-                    subscription_paused: false,
                     sent_fps: top.as_ref().map(|t| t.fps).unwrap_or(0.0),
                     decode_fps: me.as_ref().map(|r| r.fps).unwrap_or(0.0),
                     loss_ratio: me.as_ref().map(|r| r.loss_ratio).unwrap_or(0.0),
@@ -1292,6 +1277,16 @@ fn spatial_layers(l: &Layering) -> u32 {
             .unwrap_or(1),
         _ => 1,
     }
+}
+
+/// Every request is an explicit size: the SFU forwards the smallest layer
+/// that covers it. "Top layer" asks for the published size.
+fn apply_request(remote: &Remote, size: Option<(u32, u32)>) {
+    let dim = match size {
+        Some((w, h)) => TrackDimension(w, h),
+        None => remote.original,
+    };
+    remote.publication.update_video_dimensions(dim);
 }
 
 fn events_time() -> String {

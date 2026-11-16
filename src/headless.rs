@@ -229,6 +229,12 @@ pub fn run(args: &[String]) -> i32 {
         let (rh, _) = line(&session, 0);
         println!("asked for {aw}x{ah}: now receiving {rh}p");
         ok &= rh > 0 && rh < h;
+        // The request must survive a republish (a new track is subscribed).
+        session.republish(publish.clone());
+        std::thread::sleep(Duration::from_secs(6));
+        let (rh, _) = line(&session, 0);
+        println!("after republish: receiving {rh}p");
+        ok &= rh > 0 && rh < h;
         session.request_size(None);
         std::thread::sleep(Duration::from_secs(5));
         let (rh, _) = line(&session, 0);

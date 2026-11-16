@@ -8,7 +8,7 @@ use eframe::egui::{self, RichText};
 use super::widgets::{self, big, dims, live_badge, or_dash, stage_card, Series};
 use super::App;
 use crate::capabilities::codec_name;
-use crate::session::{Layering, Phase, SharedPreview, VideoQuality};
+use crate::session::{Layering, Phase, SharedPreview};
 use crate::stats::{Snapshot, HISTORY};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -16,6 +16,28 @@ pub enum ChartMetric {
     Bitrate,
     Resolution,
     FrameRate,
+}
+
+/// What the app's subscriber asks the SFU to forward. Every choice is sent
+/// as a size, which works for simulcast and SVC alike (the SDK's quality
+/// call is simulcast-only), and the SFU picks the smallest layer covering it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SubAsk {
+    Top,
+    FitTile,
+    Half,
+    Quarter,
+}
+
+impl SubAsk {
+    pub fn label(self) -> &'static str {
+        match self {
+            SubAsk::Top => "Top layer",
+            SubAsk::FitTile => "Fit the far-end tile",
+            SubAsk::Half => "Half size",
+            SubAsk::Quarter => "Quarter size",
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -353,9 +375,8 @@ impl App {
         let me = snap.self_receive().cloned();
         let health = snap.health.clone();
         let weak = widgets::weak(ui);
-        let quality_live = matches!(layering, Some(Layering::Simulcast) | Some(Layering::Svc(_)));
-        let mut quality = self.quality;
-        let mut ask = self.ask_optimal;
+        let layered = matches!(layering, Some(Layering::Simulcast) | Some(Layering::Svc(_)));
+        let mut ask = self.sub_ask;
         ui.columns(5, |cols| {
             stage_card(&mut cols[0], "1 · Capture", &health.capture, |ui| {
                 ui.label(big(dims(snap.capture.width, snap.capture.height)));
@@ -414,21 +435,22 @@ impl App {
                     }
                 }
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Subscriber layer").small());
+                    ui.label(RichText::new("Subscriber asks for").small());
                     live_badge(ui);
                 });
-                ui.add_enabled_ui(quality_live && phase.connected(), |ui| {
-                    egui::ComboBox::from_id_salt("sub-layer")
-                        .selected_text(quality_name(quality))
-                        .width(ui.available_width().min(140.0))
+                ui.add_enabled_ui(layered && phase.connected(), |ui| {
+                    egui::ComboBox::from_id_salt("sub-ask")
+                        .selected_text(ask.label())
+                        .width(ui.available_width().min(170.0))
                         .show_ui(ui, |ui| {
-                            for q in [VideoQuality::High, VideoQuality::Medium, VideoQuality::Low] {
-                                ui.selectable_value(&mut quality, q, quality_name(q));
+                            for a in [SubAsk::Top, SubAsk::FitTile, SubAsk::Half, SubAsk::Quarter] {
+                                ui.selectable_value(&mut ask, a, a.label());
                             }
                         });
                 })
                 .response
-                .on_disabled_hover_text("Needs simulcast or SVC: a single layer has nothing to choose from.");
+                .on_hover_text("The app's subscriber tells the SFU what size it wants; the SFU forwards the smallest simulcast or SVC layer that covers it. Fit the far-end tile follows the preview's size in physical pixels, at most every 5 s and only when it changes.")
+                .on_disabled_hover_text("Publish with simulcast or SVC: with a single layer the SFU has nothing to choose from.");
             });
             stage_card(&mut cols[4], "5 · Receive and decode", &health.receive, |ui| {
                 match &me {
@@ -446,41 +468,95 @@ impl App {
                         ui.label(big("–"));
                     }
                 }
-                ui.checkbox(&mut ask, RichText::new("Ask optimal resolution").small()).on_hover_text(
-                    "Tell the SFU the size of the far-end tile, so it forwards the smallest layer that fills it. Sent at most every 5 s, and only when the size changed.",
-                );
             });
         });
-        if quality != self.quality {
-            self.quality = quality;
-            self.session.set_quality(quality);
+        if ask != self.sub_ask {
+            self.set_sub_ask(ask);
         }
-        if ask != self.ask_optimal {
-            self.set_ask_optimal(ask);
-        }
-        // Status line for the size request.
-        let text = if !self.ask_optimal {
-            "Ask optimal resolution is off: the SFU sends the top layer it can.".to_string()
+        // What was asked and what arrives.
+        let received = me.as_ref().map(|r| (r.width, r.height)).filter(|d| d.0 > 0);
+        let arriving = received
+            .map(|(w, h)| format!(" · receiving {w}×{h}"))
+            .unwrap_or_default();
+        let text = if !layered {
+            "Single layer: the SFU forwards the only layer there is. Publish with simulcast or SVC to choose.".to_string()
         } else {
-            match (snap.requested_size, snap.requested_ago_s) {
-                (Some((w, h)), Some(ago)) => format!("Asking {w}×{h} for the far-end tile · sent {ago:.0} s ago · at most every 5 s, only on change"),
-                _ => "Ask optimal resolution is on: waiting for the far-end tile".to_string(),
+            match (self.sub_ask, snap.requested_size) {
+                (SubAsk::Top, _) => format!("Asking for the top layer{arriving}"),
+                (SubAsk::FitTile, None) => "Waiting for the far-end tile size…".to_string(),
+                (SubAsk::FitTile, Some((w, h))) => {
+                    let full = self
+                        .session
+                        .shared
+                        .lock()
+                        .active_publish
+                        .as_ref()
+                        .map(|a| a.publish_dims());
+                    let note = match full {
+                        Some((fw, fh)) if w >= fw && h >= fh => {
+                            " (tile is at least the video size, so the top layer)"
+                        }
+                        _ => "",
+                    };
+                    let ago = snap
+                        .requested_ago_s
+                        .map(|s| format!(" · sent {s:.0} s ago"))
+                        .unwrap_or_default();
+                    format!("Asking {w}×{h} px for the far-end tile{note}{arriving}{ago}")
+                }
+                (_, Some((w, h))) => format!("Asking {w}×{h}{arriving}"),
+                (_, None) => format!("Asking…{arriving}"),
             }
         };
         ui.label(RichText::new(text).small().color(widgets::weak(ui)));
     }
 
-    pub(super) fn set_ask_optimal(&mut self, on: bool) {
-        self.ask_optimal = on;
+    pub(super) fn set_sub_ask(&mut self, ask: SubAsk) {
+        self.sub_ask = ask;
         self.throttle.reset();
-        if !on {
+        self.ask_sent = None;
+        if ask == SubAsk::Top {
             self.session.request_size(None);
+        }
+        // Fit tile is sent from observe_tile; Half and Quarter from keep_sub_ask.
+    }
+
+    /// Run every frame: trailing tile updates, and fixed fractions that must
+    /// follow the publish size.
+    pub(super) fn keep_sub_ask(&mut self) {
+        if !self.session.phase().connected() {
+            return;
+        }
+        match self.sub_ask {
+            SubAsk::FitTile => {
+                if let Some(size) = self.throttle.poll(Instant::now()) {
+                    self.session.request_size(Some(size));
+                }
+            }
+            SubAsk::Half | SubAsk::Quarter => {
+                let div = if self.sub_ask == SubAsk::Half { 2 } else { 4 };
+                let full = self
+                    .session
+                    .shared
+                    .lock()
+                    .active_publish
+                    .as_ref()
+                    .map(|a| a.publish_dims());
+                if let Some((w, h)) = full {
+                    let want = ((w / div) & !1, (h / div) & !1);
+                    if self.ask_sent != Some(want) {
+                        self.ask_sent = Some(want);
+                        self.session.request_size(Some(want));
+                    }
+                }
+            }
+            SubAsk::Top => {}
         }
     }
 
     /// Called with the far-end tile size in physical pixels each frame it is shown.
     pub(super) fn observe_tile(&mut self, rect: egui::Rect, ppp: f32) {
-        if !self.ask_optimal || !self.session.phase().connected() {
+        if self.sub_ask != SubAsk::FitTile || !self.session.phase().connected() {
             return;
         }
         let w = ((rect.width() * ppp) as u32) & !1;
@@ -563,13 +639,9 @@ impl App {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("Far end · decoded").strong());
                         ui.label(RichText::new(&far_caption).small().color(widgets::weak(ui)));
-                        let mut ask = self.ask_optimal;
-                        if ui
-                            .checkbox(&mut ask, RichText::new("Ask optimal resolution").small())
-                            .on_hover_text("Ask the SFU for the layer that fits this tile, docked or undocked. At most every 5 s, only when the size changed.")
-                            .changed()
-                        {
-                            self.set_ask_optimal(ask);
+                        if self.sub_ask == SubAsk::FitTile {
+                            widgets::badge(ui, "FITS TILE", super::theme::ACCENT_TEXT, super::theme::ACCENT_BG)
+                                .on_hover_text("The SFU is asked for the layer that fits this preview, docked or undocked.");
                         }
                         if !self.remote_undocked && ui.small_button("Undock").clicked() {
                             self.remote_undocked = true;
@@ -781,12 +853,4 @@ fn show_preview_window(
         }
     });
     (close, tile)
-}
-
-pub fn quality_name(q: VideoQuality) -> &'static str {
-    match q {
-        VideoQuality::High => "High (top layer)",
-        VideoQuality::Medium => "Medium",
-        VideoQuality::Low => "Low",
-    }
 }
