@@ -109,6 +109,9 @@ pub struct App {
     /// Settings as last written to settings.json, and when.
     saved: Option<saved::Saved>,
     saved_at: Instant,
+    /// False for scripted launches (WB_OPEN) and when the settings file could
+    /// not be read: then nothing is written over the user's settings.
+    persist_settings: bool,
     /// Newer livekit-server check and update, shared with background work.
     server_update: Arc<Mutex<crate::server_update::UpdateState>>,
     /// Browser viewers ask the SFU for a layer that fits their video element.
@@ -189,6 +192,7 @@ impl App {
             e2ee_key: "workbench-test-key".into(),
             saved: None,
             saved_at: Instant::now(),
+            persist_settings: std::env::var_os("WB_OPEN").is_none(),
             server_update: Default::default(),
             autoconnect_pending: std::env::var_os("WB_AUTOCONNECT").is_some(),
             rt,
@@ -221,10 +225,18 @@ impl App {
             app.form.source = SourceKind::Camera(c.index);
         }
         // Settings from the last run, unless this is a scripted dev launch.
-        if std::env::var_os("WB_OPEN").is_none() {
-            if let Some(s) = saved::load() {
-                app.apply_saved(&s);
-                app.saved = Some(s);
+        if app.persist_settings {
+            match saved::load() {
+                Ok(Some(s)) => {
+                    app.apply_saved(&s);
+                    app.saved = Some(s);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    log::warn!("settings: {e}");
+                    // A file that could not even be read is not overwritten.
+                    app.persist_settings = e.contains("is not valid");
+                }
             }
         }
         app.last_source = app.form.source.clone();

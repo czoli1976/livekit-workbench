@@ -48,9 +48,38 @@ fn path() -> Option<PathBuf> {
         .map(|d| d.config_dir().join("settings.json"))
 }
 
-pub fn load() -> Option<Saved> {
-    let text = std::fs::read_to_string(path()?).ok()?;
-    serde_json::from_str(&text).ok()
+/// The saved settings: `Ok(None)` when there are none yet. A file that cannot
+/// be parsed is moved aside to `settings.bad.json`, so it is kept, and the
+/// error is returned; a file that cannot be read is an error and left alone.
+pub fn load() -> Result<Option<Saved>, String> {
+    let Some(p) = path() else { return Ok(None) };
+    let text = match std::fs::read_to_string(&p) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("reading {}: {e}", p.display())),
+    };
+    serde_json::from_str(&text).map(Some).map_err(|e| {
+        let bad = p.with_file_name("settings.bad.json");
+        let _ = std::fs::rename(&p, &bad);
+        format!(
+            "{} is not valid ({e}); kept as {}",
+            p.display(),
+            bad.display()
+        )
+    })
+}
+
+/// Write `text` to `p` through a temporary file, so a failed or interrupted
+/// write never leaves a half-written settings file.
+fn write_atomic(p: &std::path::Path, text: &str) -> std::io::Result<()> {
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = p.with_extension("json.tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, p).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
 }
 
 fn codec_key(c: VideoCodec) -> &'static str {
@@ -212,6 +241,9 @@ impl App {
 
     /// Write the settings about a second after they change, and on quit.
     pub(super) fn save_settings(&mut self, now: bool) {
+        if !self.persist_settings {
+            return;
+        }
         let s = self.to_saved();
         if Some(&s) == self.saved.as_ref() {
             return;
@@ -221,18 +253,14 @@ impl App {
         }
         self.saved_at = Instant::now();
         let Some(p) = path() else { return };
-        if let Some(dir) = p.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
+        // Recorded only once written, so a failed write is retried.
         match serde_json::to_string_pretty(&s) {
-            Ok(text) => {
-                if let Err(e) = std::fs::write(&p, text) {
-                    log::warn!("saving settings: {e}");
-                }
-            }
+            Ok(text) => match write_atomic(&p, &text) {
+                Ok(()) => self.saved = Some(s),
+                Err(e) => log::warn!("saving settings: {e}"),
+            },
             Err(e) => log::warn!("saving settings: {e}"),
         }
-        self.saved = Some(s);
     }
 }
 
@@ -253,6 +281,17 @@ mod tests {
         ] {
             assert_eq!(degradation_from(degradation_key(d)), d);
         }
+    }
+
+    #[test]
+    fn atomic_write_replaces_and_leaves_no_temp() {
+        let dir = std::env::temp_dir().join(format!("wb-saved-{}", std::process::id()));
+        let p = dir.join("settings.json");
+        write_atomic(&p, "{\"codec\":\"vp8\"}").unwrap();
+        write_atomic(&p, "{\"codec\":\"av1\"}").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "{\"codec\":\"av1\"}");
+        assert!(!p.with_extension("json.tmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

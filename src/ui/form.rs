@@ -645,7 +645,11 @@ impl App {
         if publishing {
             if let Some(active) = &active {
                 let want = self.form.to_config();
-                if diff(active, &want).live && self.form != before {
+                // Switching to the screen republishes instead: it also changes
+                // the track source and content hint, and the picker opens once.
+                let to_screen =
+                    want.source == SourceKind::Screen && active.source != SourceKind::Screen;
+                if diff(active, &want).live && self.form != before && !to_screen {
                     self.session.switch_source(want);
                 }
             }
