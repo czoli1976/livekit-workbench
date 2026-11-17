@@ -1,9 +1,14 @@
 Workbench for LiveKit
 Copyright 2026 czoli1976
 
-This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+This project's own source code is licensed under MIT No Attribution (MIT-0, see LICENSE):
+use it for anything, including commercially, with no conditions.
 
-It builds on the LiveKit Rust SDK (Apache 2.0, https://github.com/livekit/rust-sdks),
-which bundles a prebuilt WebRTC (BSD-style licence, https://webrtc.org/support/license),
-and on egui/eframe (MIT or Apache 2.0, https://github.com/emilk/egui).
-The browser viewer page loads the LiveKit JavaScript SDK (Apache 2.0) from jsDelivr.
+For information: a built app also contains third-party software under its own
+permissive licences, which are not changed by this project's licence:
+- LiveKit Rust SDK (Apache 2.0) - https://github.com/livekit/rust-sdks
+- WebRTC, bundled prebuilt by the SDK (BSD-style) - https://webrtc.org/support/license
+  with libvpx, libaom, dav1d and OpenH264 (BSD-style)
+- egui / eframe (MIT or Apache 2.0) - https://github.com/emilk/egui
+- other Rust crates listed in Cargo.lock, under their own licences
+The browser pages load the LiveKit JavaScript SDK (Apache 2.0) from jsDelivr.

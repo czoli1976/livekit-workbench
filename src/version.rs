@@ -6,7 +6,7 @@ pub const AUTHOR_HANDLE: &str = "czoli1976";
 pub const AUTHOR_GITHUB: &str = "https://github.com/czoli1976";
 pub const AUTHOR_LINKEDIN: &str = "https://www.linkedin.com/in/ckristianzoli";
 pub const REPO_URL: &str = "https://github.com/czoli1976/livekit-workbench";
-pub const LICENSE: &str = "Apache 2.0";
+pub const LICENSE: &str = "MIT No Attribution (MIT-0)";
 
 /// Exact `livekit` crate version resolved in Cargo.lock for this build.
 pub const LIVEKIT_SDK: &str = env!("WB_LIVEKIT_VERSION");

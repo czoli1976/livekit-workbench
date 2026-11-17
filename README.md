@@ -2,7 +2,9 @@
 
 A desktop app for seeing what really happens to video in [LiveKit](https://livekit.io): pick a codec, an encoder (hardware or software), simulcast or SVC, a bitrate cap, and watch every stage of the pipeline, from capture through encode, send and the SFU to the decoder at the far end, with the numbers WebRTC itself reports.
 
-![Workbench for LiveKit publishing H.264 through a local server: previews on top, pipeline cards outlined green](docs/screenshot.png)
+![Workbench for LiveKit publishing H.264 simulcast through a local server: previews on top, pipeline cards outlined green](docs/screenshots/main.png)
+
+**[Install and usage guide →](docs/GUIDE.md)**
 
 Built in Rust with the [LiveKit Rust SDK](https://github.com/livekit/rust-sdks) and [egui](https://github.com/emilk/egui). Runs on macOS, Windows and Linux.
 
@@ -134,9 +136,17 @@ cargo test
 
 On macOS, `scripts/make-app.sh` wraps the binary in `dist/Workbench for LiveKit.app`, which macOS needs to ask for camera access.
 
+## Screenshots
+
+| Stats & Telemetry | Host capabilities |
+|---|---|
+| ![Stats & Telemetry](docs/screenshots/stats.png) | ![Host capabilities](docs/screenshots/capabilities.png) |
+| **Server profiles** | **About** |
+| ![Server profiles](docs/screenshots/profiles.png) | ![About](docs/screenshots/about.png) |
+
 ## Licence
 
-Apache 2.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+[MIT No Attribution (MIT-0)](LICENSE): use, copy, modify and sell it, commercially or not, with no conditions and no attribution required. A built app also contains third-party software under its own permissive licences (LiveKit SDK, WebRTC, egui); see [NOTICE](NOTICE).
 
 ## Author
 

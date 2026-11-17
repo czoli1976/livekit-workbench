@@ -134,6 +134,8 @@ impl App {
         }
         let mut close = false;
         ctx.show_viewport_immediate(id, builder, |ui, _| {
+            // A child window repaints only when asked: refresh with each sample.
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
             egui::Panel::top("stats-top")
                 .frame(super::theme::top_frame())
                 .show(ui, |ui| {
@@ -673,6 +675,8 @@ impl App {
             };
             ui.colored_label(color, text);
             self.server_buttons(ui);
+            self.check_version_button(ui);
+            self.server_update_ui(ui);
         });
         ui.add_space(6.0);
         let f =

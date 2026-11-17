@@ -170,6 +170,7 @@ impl App {
                     "about" => app.show_about = true,
                     "far" => app.remote_undocked = true,
                     "nosettings" => app.settings_open = false,
+                    "simulcast" => app.form.layers = form::LayerKind::Simulcast,
                     "local" => app.local_undocked = true,
                     _ => {}
                 }
@@ -705,6 +706,7 @@ impl App {
                     self.show_stats = true;
                     self.stats_ui.tab = stats_window::StatsTab::Server;
                 }
+                self.check_version_button(ui);
                 self.server_update_ui(ui);
                 ui.separator();
             }
@@ -782,6 +784,10 @@ impl App {
 
 /// Whether the main window is in full-screen mode (always asked of the root).
 fn main_is_fullscreen(ctx: &egui::Context) -> bool {
+    // WB_EMBED=1 draws child windows inside the main one (screenshots, demos).
+    if std::env::var_os("WB_EMBED").is_some() {
+        return true;
+    }
     ctx.input_for(egui::ViewportId::ROOT, |i| {
         i.viewport().fullscreen.unwrap_or(false)
     })
@@ -843,7 +849,22 @@ impl App {
         });
     }
 
-    fn server_update_ui(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn check_version_button(&mut self, ui: &mut egui::Ui) {
+        use crate::server_update::UpdateState;
+        let busy = matches!(
+            *self.server_update.lock(),
+            UpdateState::Checking | UpdateState::Updating(_)
+        );
+        if ui
+            .add_enabled(!busy, egui::Button::new("Check version").small())
+            .on_hover_text("Compare the installed livekit-server with LiveKit's latest GitHub release.")
+            .clicked()
+        {
+            self.check_server_update();
+        }
+    }
+
+    pub(super) fn server_update_ui(&mut self, ui: &mut egui::Ui) {
         use crate::server_update::{InstallKind, UpdateState};
         let state = self.server_update.lock().clone();
         match state {
@@ -898,7 +919,14 @@ impl App {
                     *self.server_update.lock() = UpdateState::Idle;
                 }
             }
-            UpdateState::Idle | UpdateState::Checking | UpdateState::UpToDate(_) => {}
+            UpdateState::Checking => {
+                ui.label(RichText::new("checking for updates…").small().color(theme::MUTED));
+            }
+            UpdateState::UpToDate(v) => {
+                ui.label(RichText::new("✓ latest").small().color(theme::GREEN_TEXT))
+                    .on_hover_text(format!("Checked LiveKit's GitHub releases at start-up: {v} is the newest livekit-server."));
+            }
+            UpdateState::Idle => {}
         }
     }
 }
