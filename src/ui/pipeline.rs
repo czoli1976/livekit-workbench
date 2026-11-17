@@ -142,6 +142,10 @@ impl App {
             )
         };
 
+        // ---- Previews, at the top: the video is what people look at first.
+        self.previews_ui(ui, &snap);
+        ui.add_space(12.0);
+
         // ---- Header
         ui.horizontal_wrapped(|ui| {
             ui.heading("Pipeline");
@@ -353,10 +357,6 @@ impl App {
         };
         widgets::legend(ui, &series);
         widgets::line_chart(ui, 130.0, unit, &series, HISTORY);
-
-        // ---- Previews
-        ui.add_space(10.0);
-        self.previews_ui(ui, &snap);
 
         // ---- Invite
         ui.add_space(10.0);
