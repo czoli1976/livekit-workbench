@@ -27,10 +27,10 @@ livekit-server 1.13.11.
 - **Settings are remembered** between launches.
 - **Preview before connecting.** The chosen input shows in the local tile
   straight away, and the app starts on the system camera.
-- **End-to-end test suite.** `scripts/e2e.sh` runs 15 headless round trips
+- **End-to-end test suite.** `scripts/e2e.sh` runs 16 headless round trips
   through a running server. It covers codecs and layers, the publish
-  lifecycle, layer requests, audio, E2EE, impairment and live input
-  switching.
+  lifecycle, layer requests, audio, E2EE, impairment, the relay retry and
+  live input switching.
 
 ### Fixed
 
@@ -49,10 +49,13 @@ livekit-server 1.13.11.
 
 ### Known issues
 
-- About one in twenty connections through the impairment relay never
-  connects on the first try. The app retries once with a new relay, which
-  has connected every time in testing. The cause is between WebRTC's TURN
-  client and the relay and is not yet found.
+- Now and then a connection through the impairment relay does not connect
+  on the first try. Before the retry it was about one in twenty. No packet
+  passes the relay for that connection; the cause lies between WebRTC's TURN
+  client and the relay and is not yet found. The app now gives up on the
+  first try after 5 s and tries once more with a new relay. In 60 runs after
+  the change the first try never failed; the retry itself is tested by
+  forcing the first try to time out.
 - Tested on macOS (Apple silicon). Linux and Windows are built and
   unit-tested in CI but not run by hand.
 - This release is the source tag; build with `scripts/build.sh` or

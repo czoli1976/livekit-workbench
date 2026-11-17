@@ -608,10 +608,13 @@ impl Engine {
         }
         let links = self.shared.lock().links.clone();
         let mut last_err = None;
-        for (attempt, timeout) in [RELAY_FIRST_TRY_TIMEOUT, CONNECT_TIMEOUT]
-            .into_iter()
-            .enumerate()
-        {
+        // WB_RELAY_FIRST_TRY_MS shortens the first try, to exercise the retry in tests.
+        let first = std::env::var("WB_RELAY_FIRST_TRY_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .map(Duration::from_millis)
+            .unwrap_or(RELAY_FIRST_TRY_TIMEOUT);
+        for (attempt, timeout) in [first, CONNECT_TIMEOUT].into_iter().enumerate() {
             if attempt > 0 {
                 self.event("Connecting through the relay timed out; trying again with a new relay");
             }

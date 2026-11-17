@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end suite: each case publishes, goes through a LiveKit server and is
+# End-to-end suite (16 cases): each case publishes, goes through a LiveKit server and is
 # received back by the app (headless), and passes when media made the trip.
 #
 #   scripts/e2e.sh [path/to/livekit-workbench]
@@ -40,6 +40,8 @@ run "End-to-end encryption"          --e2ee e2e-test-pass --audio tone --seconds
 run "Uplink 3% loss, 40 ms"          --up 3,40,10 --layers simulcast --audio tone --seconds 12
 run "Uplink 40 ms delay"             --up 0,40 --seconds 8
 run "Downlink 1.5 Mbps cap"          --down 0,0,0,1500 --layers simulcast --seconds 15
+WB_RELAY_FIRST_TRY_MS=50 \
+run "Relay connect retry (forced)"  --up 0 --seconds 6
 run "Live input switch"              --source pattern --switch detail,pattern --seconds 4
 echo "TOTAL: $pass passed, $fail failed"
 [[ $fail -eq 0 ]]
