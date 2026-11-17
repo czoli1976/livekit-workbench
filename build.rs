@@ -1,7 +1,9 @@
 //! Build script:
 //! - records the exact LiveKit SDK versions resolved in Cargo.lock, so the About
 //!   dialog shows what was really compiled in, not what Cargo.toml allows;
-//! - links with -ObjC on macOS, which WebRTC's Objective-C categories need.
+//! - links with -ObjC on macOS, which WebRTC's Objective-C categories need;
+//! - links GLib/GIO on Linux, which WebRTC's screen capture (the PipeWire
+//!   portal) calls; webrtc-sys compiles against their headers only.
 
 use std::path::PathBuf;
 
@@ -89,7 +91,13 @@ fn main() {
     let target = std::env::var("TARGET").unwrap_or_default();
     println!("cargo:rustc-env=WB_TARGET={target}");
 
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
-        println!("cargo:rustc-link-arg=-ObjC");
+    match std::env::var("CARGO_CFG_TARGET_OS").as_deref() {
+        Ok("macos") => println!("cargo:rustc-link-arg=-ObjC"),
+        Ok("linux") => {
+            for lib in ["gio-2.0", "gobject-2.0", "glib-2.0"] {
+                println!("cargo:rustc-link-lib=dylib={lib}");
+            }
+        }
+        _ => {}
     }
 }
