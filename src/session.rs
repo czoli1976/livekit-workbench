@@ -41,6 +41,10 @@ pub const PUBLISHER_STATS_TOPIC: &str = "workbench.publisher-stats";
 /// Identity prefix of a Chrome publisher started from the app.
 pub const BROWSER_PUB_PREFIX: &str = "chrome-pub-";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// A connect through the impairment relay normally takes under a second.
+/// About one in twenty never connects (no packet passes the relay for one
+/// connection), so the first try gives up early and a fresh relay is tried.
+const RELAY_FIRST_TRY_TIMEOUT: Duration = Duration::from_secs(5);
 const PREVIEW_MAX_W: u32 = 640;
 const PREVIEW_INTERVAL: Duration = Duration::from_millis(30);
 const HEALTH_WINDOW: usize = 5;
@@ -597,37 +601,43 @@ impl Engine {
     }
 
     async fn connect(&mut self, cfg: ConnectConfig) -> Result<()> {
-        let relay = if cfg.impair {
-            let links = self.shared.lock().links.clone();
-            Some(crate::impair::Relay::start(&cfg.url, &links).await?)
-        } else {
-            None
-        };
-        let result = self.connect_rooms(cfg, relay.as_ref()).await;
-        match result {
-            Ok(mut conn) => {
-                if relay.is_some() {
-                    let links = self.shared.lock().links.clone();
+        if !cfg.impair {
+            let conn = self.connect_rooms(cfg, None, CONNECT_TIMEOUT).await?;
+            self.conn = Some(conn);
+            return Ok(());
+        }
+        let links = self.shared.lock().links.clone();
+        let mut last_err = None;
+        for (attempt, timeout) in [RELAY_FIRST_TRY_TIMEOUT, CONNECT_TIMEOUT]
+            .into_iter()
+            .enumerate()
+        {
+            if attempt > 0 {
+                self.event("Connecting through the relay timed out; trying again with a new relay");
+            }
+            let relay = crate::impair::Relay::start(&cfg.url, &links).await?;
+            match self.connect_rooms(cfg.clone(), Some(&relay), timeout).await {
+                Ok(mut conn) => {
                     links.up.armed.store(true, Ordering::Relaxed);
                     links.down.armed.store(true, Ordering::Relaxed);
+                    conn.relay = Some(relay);
+                    self.conn = Some(conn);
+                    return Ok(());
                 }
-                conn.relay = relay;
-                self.conn = Some(conn);
-                Ok(())
-            }
-            Err(e) => {
-                if let Some(r) = relay {
-                    r.close().await;
+                Err(e) => {
+                    relay.close().await;
+                    last_err = Some(e);
                 }
-                Err(e)
             }
         }
+        Err(last_err.expect("at least one attempt"))
     }
 
     async fn connect_rooms(
         &mut self,
         cfg: ConnectConfig,
         relay: Option<&crate::impair::Relay>,
+        timeout: Duration,
     ) -> Result<Connection> {
         let suffix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -642,17 +652,15 @@ impl Engine {
         sub_opts.adaptive_stream = false;
         sub_opts.encryption = encryption(&cfg);
         let sub_token = token(&cfg, &format!("workbench-sub-{suffix}"), false)?;
-        let (sub_room, sub_events) = tokio::time::timeout(
-            CONNECT_TIMEOUT,
-            Room::connect(&cfg.url, &sub_token, sub_opts),
-        )
-        .await
-        .map_err(|_| anyhow!("Timed out connecting to {}", cfg.url))?
-        .with_context(|| format!("Could not connect to {}", cfg.url))?;
+        let (sub_room, sub_events) =
+            tokio::time::timeout(timeout, Room::connect(&cfg.url, &sub_token, sub_opts))
+                .await
+                .map_err(|_| anyhow!("Timed out connecting to {}", cfg.url))?
+                .with_context(|| format!("Could not connect to {}", cfg.url))?;
 
         let pub_token = token(&cfg, &format!("workbench-pub-{suffix}"), true)?;
         let pub_result = tokio::time::timeout(
-            CONNECT_TIMEOUT,
+            timeout,
             Room::connect(&cfg.url, &pub_token, {
                 let mut o = RoomOptions::default();
                 o.encryption = encryption(&cfg);

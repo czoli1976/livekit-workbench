@@ -62,7 +62,7 @@ scripts/build.sh --sdk-version 0.11.0
 scripts\build.ps1 -SdkVersion 0.11.0
 ```
 
-Version 1.0 was tested with SDK 0.11.0. *About* shows the exact SDK version the app was built with, read from `Cargo.lock` at build time.
+Version 2.0 was tested with SDK 0.11.0. *About* shows the exact SDK version the app was built with, read from `Cargo.lock` at build time.
 
 ### What the scripts install
 

@@ -121,7 +121,7 @@ function Select-Sdk {
   $api = Latest-Crate "livekit-api"
   if ($api) { cargo add "livekit-api@$api" --features rustls-tls-native-roots | Out-Null }
   if ($want -ne $TestedSdk) {
-    Warn "Workbench 1.0 was tested with SDK $TestedSdk. If the build fails, run: scripts\build.ps1 -SdkVersion $TestedSdk"
+    Warn "Workbench 2.0 was tested with SDK $TestedSdk. If the build fails, run: scripts\build.ps1 -SdkVersion $TestedSdk"
   }
 }
 

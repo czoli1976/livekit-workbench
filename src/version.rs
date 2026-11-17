@@ -1,7 +1,7 @@
 //! Version information baked in at build time (see build.rs).
 
 pub const APP_NAME: &str = "Workbench for LiveKit";
-pub const APP_VERSION: &str = "1.0";
+pub const APP_VERSION: &str = "2.0";
 pub const AUTHOR_HANDLE: &str = "czoli1976";
 pub const AUTHOR_GITHUB: &str = "https://github.com/czoli1976";
 pub const AUTHOR_LINKEDIN: &str = "https://www.linkedin.com/in/ckristianzoli";
