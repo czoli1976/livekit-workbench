@@ -807,6 +807,108 @@ impl App {
                 .small(),
             );
         }
+        ui.add_space(8.0);
+        self.chrome_publisher_ui(ui, snap, phase);
+    }
+
+    /// A Chrome publisher with WebRTC's FlexFEC field trials, to test the
+    /// server's upstream FlexFEC: this SDK's publisher cannot offer it.
+    fn chrome_publisher_ui(&mut self, ui: &mut egui::Ui, snap: &Snapshot, phase: Phase) {
+        ui.label(RichText::new("Publish from Chrome with FlexFEC").strong());
+        ui.label(
+            RichText::new("Starts a separate Chrome with WebRTC's FlexFEC-03 field trials and publishes a synthetic video with this panel's codec, size, frame rate, bitrate cap and layers. The app receives it in place of its own publisher, so unpublish first.")
+                .small()
+                .color(widgets::weak(ui)),
+        );
+        let profile = self.current_profile();
+        let accepts = profile.is_local() && profile.local.flexfec_upstream;
+        if profile.is_local() && !profile.local.flexfec_upstream {
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(widgets::amber(ui), "The local server does not accept FlexFEC upstream yet.");
+                if ui
+                    .small_button("Turn it on")
+                    .on_hover_text("Sets rtc.flexfec.upstream_enabled in the Local dev profile and restarts the server (disconnects).")
+                    .clicked()
+                {
+                    if let Some(p) = self.store.profiles.iter_mut().find(|p| p.id == self.profile_id) {
+                        p.local.flexfec_upstream = true;
+                    }
+                    self.save_store();
+                    self.restart_server();
+                }
+            });
+        } else if !profile.is_local() {
+            ui.label(
+                RichText::new("On a remote server, FlexFEC upstream depends on that server's configuration (LiveKit 1.13.11 or later with rtc.flexfec.upstream_enabled).")
+                    .small()
+                    .color(widgets::weak(ui)),
+            );
+        }
+        let chrome = crate::viewer::chrome_path().is_some();
+        let can = chrome && self.viewer.is_some() && phase == Phase::Connected;
+        let why = if !chrome {
+            "Google Chrome was not found."
+        } else if self.viewer.is_none() {
+            "Start the local HTTP server first."
+        } else if phase == Phase::Publishing {
+            "Unpublish first: the app then receives the Chrome stream."
+        } else {
+            "Connect first."
+        };
+        if ui
+            .add_enabled(can, widgets::accent_button("Publish from Chrome"))
+            .on_disabled_hover_text(why)
+            .clicked()
+        {
+            self.launch_chrome_publisher();
+        }
+        if let Some(b) = &snap.browser_pub {
+            let overhead = if b.media_mbps > 0.05 {
+                format!(
+                    " (+{:.0}% on the wire)",
+                    (b.wire_mbps / b.media_mbps - 1.0) * 100.0
+                )
+            } else {
+                String::new()
+            };
+            let fec = if b.flexfec {
+                "FlexFEC negotiated"
+            } else {
+                "FlexFEC not negotiated"
+            };
+            let color = if b.flexfec {
+                widgets::green(ui)
+            } else {
+                widgets::amber(ui)
+            };
+            ui.colored_label(
+                color,
+                format!(
+                    "{} ({}): {} · {}×{} @ {:.0} fps · media {:.2} Mbps, wire {:.2}{overhead} · RTX {:.2} Mbps",
+                    b.who,
+                    b.user_agent,
+                    fec,
+                    b.width,
+                    b.height,
+                    b.fps,
+                    b.media_mbps,
+                    b.wire_mbps,
+                    b.rtx_mbps
+                ),
+            );
+            if accepts {
+                let st = self.server.stats();
+                if let (Some(rx), Some(rec)) = (st.fec_received, st.fec_recovered) {
+                    ui.label(
+                        RichText::new(format!(
+                            "Server FlexFEC since start: {rx} FEC packets received, {rec} media packets recovered, {} discarded",
+                            st.fec_discarded.unwrap_or(0)
+                        ))
+                        .small(),
+                    );
+                }
+            }
+        }
     }
 }
 

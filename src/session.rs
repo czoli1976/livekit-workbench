@@ -31,6 +31,9 @@ use crate::health::{self, HealthInput};
 use crate::stats::{self, push, LayerRow, RawIn, RawOut, ReceiveRow, Snapshot};
 
 pub const VIEWER_STATS_TOPIC: &str = "workbench.viewer-stats";
+pub const PUBLISHER_STATS_TOPIC: &str = "workbench.publisher-stats";
+/// Identity prefix of a Chrome publisher started from the app.
+pub const BROWSER_PUB_PREFIX: &str = "chrome-pub-";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const PREVIEW_MAX_W: u32 = 640;
 const PREVIEW_INTERVAL: Duration = Duration::from_millis(30);
@@ -277,6 +280,8 @@ struct Connection {
     published: Option<Published>,
     sink_frames: Arc<AtomicU64>,
     viewers: HashMap<String, (ReceiveRow, Instant)>,
+    browser_pub: Option<(crate::stats::BrowserPublisher, Instant)>,
+    following_chrome: bool,
     prev: Prev,
     health_window: VecDeque<HealthInput>,
     requested: Option<((u32, u32), Instant)>,
@@ -433,6 +438,8 @@ impl Engine {
             published: None,
             sink_frames: Arc::new(AtomicU64::new(0)),
             viewers: HashMap::new(),
+            browser_pub: None,
+            following_chrome: false,
             prev: Prev::default(),
             health_window: VecDeque::new(),
             requested: None,
@@ -718,13 +725,17 @@ impl Engine {
                 let Some(conn) = self.conn.as_mut() else {
                     return;
                 };
-                if !participant
-                    .identity()
-                    .as_str()
-                    .starts_with("workbench-pub-")
-                {
-                    return; // only follow our own publisher
+                // Follow our own publisher, or a Chrome publisher started from
+                // the app; a Chrome stream, once followed, takes precedence.
+                let id = participant.identity().to_string();
+                let from_chrome = id.starts_with(BROWSER_PUB_PREFIX);
+                if !id.starts_with("workbench-pub-") && !from_chrome {
+                    return;
                 }
+                if !from_chrome && conn.following_chrome && conn.remote.is_some() {
+                    return;
+                }
+                conn.following_chrome = from_chrome;
                 let consumer = decode.then(|| {
                     let frames = conn.sink_frames.clone();
                     let preview = preview_on.then(|| self.shared.lock().remote_preview.clone());
@@ -779,6 +790,7 @@ impl Engine {
                         c.abort();
                     }
                 }
+                conn.following_chrome = false;
                 clear_preview(&self.shared.lock().remote_preview);
             }
             RoomEvent::ParticipantConnected(p) => {
@@ -830,12 +842,20 @@ impl Engine {
                 participant,
                 ..
             } => {
-                if topic.as_deref() != Some(VIEWER_STATS_TOPIC) {
-                    return;
-                }
                 let who = participant
                     .map(|p| p.identity().to_string())
                     .unwrap_or_else(|| "browser".into());
+                if topic.as_deref() == Some(PUBLISHER_STATS_TOPIC) {
+                    if let (Some(row), Some(conn)) =
+                        (parse_publisher_stats(&who, &payload), self.conn.as_mut())
+                    {
+                        conn.browser_pub = Some((row, Instant::now()));
+                    }
+                    return;
+                }
+                if topic.as_deref() != Some(VIEWER_STATS_TOPIC) {
+                    return;
+                }
                 if let Some(row) = parse_viewer_stats(&who, &payload) {
                     if let Some(conn) = self.conn.as_mut() {
                         conn.viewers.insert(who, (row, Instant::now()));
@@ -1126,6 +1146,14 @@ impl Engine {
             snap.requested_size = conn.requested.map(|(s, _)| s);
             snap.server_quality_pub = conn.quality_pub.map(|q| quality_label(q).to_string());
             snap.server_quality_sub = conn.quality_sub.map(|q| quality_label(q).to_string());
+            if conn
+                .browser_pub
+                .as_ref()
+                .is_some_and(|(_, at)| at.elapsed() > Duration::from_secs(10))
+            {
+                conn.browser_pub = None;
+            }
+            snap.browser_pub = conn.browser_pub.as_ref().map(|(b, _)| b.clone());
             snap.requested_ago_s = conn.requested.map(|(_, at)| at.elapsed().as_secs_f64());
 
             // Histories.
@@ -1385,6 +1413,59 @@ fn average(w: &VecDeque<HealthInput>) -> HealthInput {
         },
         ..last
     }
+}
+
+fn parse_publisher_stats(who: &str, payload: &[u8]) -> Option<crate::stats::BrowserPublisher> {
+    let v: serde_json::Value = serde_json::from_slice(payload).ok()?;
+    let f = |k: &str| v.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0);
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    Some(crate::stats::BrowserPublisher {
+        who: who.to_string(),
+        user_agent: s("userAgent"),
+        codecs: v
+            .get("codecs")
+            .and_then(|c| c.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        flexfec: v.get("flexfec").and_then(|x| x.as_bool()).unwrap_or(false),
+        encoder: s("encoder"),
+        width: f("width") as u32,
+        height: f("height") as u32,
+        fps: f("fps"),
+        media_mbps: f("mediaMbps"),
+        wire_mbps: f("wireMbps"),
+        rtx_mbps: f("rtxMbps"),
+        nack: f("nack") as u64,
+        pli: f("pli") as u64,
+        limit: s("limit"),
+    })
+}
+
+/// A token for a Chrome publisher started from the app.
+pub fn publisher_token(
+    api_key: &str,
+    api_secret: &str,
+    room: &str,
+    identity: &str,
+) -> Result<String> {
+    access_token::AccessToken::with_api_key(api_key, api_secret)
+        .with_identity(identity)
+        .with_name(identity)
+        .with_ttl(Duration::from_secs(6 * 3600))
+        .with_grants(access_token::VideoGrants {
+            room_join: true,
+            room: room.to_string(),
+            can_publish: Some(true),
+            can_subscribe: Some(false),
+            can_publish_data: Some(true),
+            ..Default::default()
+        })
+        .to_jwt()
+        .context("creating publisher token")
 }
 
 fn parse_viewer_stats(who: &str, payload: &[u8]) -> Option<ReceiveRow> {

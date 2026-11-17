@@ -49,6 +49,13 @@ pub struct ServerStats {
     pub mbps_in: Option<f64>,
     pub mbps_out: Option<f64>,
     pub nack_per_s: Option<f64>,
+    /// Upstream FlexFEC since the server started: FEC packets received,
+    /// media packets recovered from them, FEC packets it could not use.
+    pub fec_received: Option<u64>,
+    pub fec_recovered: Option<u64>,
+    pub fec_discarded: Option<u64>,
+    /// NACKs since the server started.
+    pub nack_total: Option<u64>,
     pub room_names: Vec<String>,
     pub participant_names: Vec<String>,
     pub warnings: u64,
@@ -472,6 +479,11 @@ impl LocalServer {
             inner.stats.mbps_out = rate("livekit_packet_bytes|outgoing").map(|b| b * 8.0 / 1e6);
             inner.stats.nack_per_s = rate("livekit_nack_total");
         }
+        let total = |k: &str| m.get(k).map(|v| *v as u64);
+        inner.stats.fec_received = total("livekit_fec_total#received");
+        inner.stats.fec_recovered = total("livekit_fec_total#recovered");
+        inner.stats.fec_discarded = total("livekit_fec_total#discarded");
+        inner.stats.nack_total = total("livekit_nack_total");
         inner.prev_metrics = Some((now, m.clone()));
     }
 }
@@ -557,6 +569,10 @@ pub fn parse_prometheus(text: &str) -> HashMap<String, f64> {
                 let dir = dir.trim_end_matches('"');
                 *out.entry(format!("{name}|{dir}")).or_default() += value;
             }
+            if let Some(kind) = label.trim().strip_prefix("type=\"") {
+                let kind = kind.trim_end_matches('"');
+                *out.entry(format!("{name}#{kind}")).or_default() += value;
+            }
         }
     }
     out
@@ -579,6 +595,16 @@ mod tests {
         assert_eq!(m["livekit_packet_total|incoming"], 15.0);
         assert_eq!(m["livekit_packet_total|outgoing"], 7.0);
         assert_eq!(m["livekit_room_total"], 1.0);
+    }
+
+    #[test]
+    fn prometheus_type_labels() {
+        let m = parse_prometheus(
+            "livekit_fec_total{direction=\"incoming\",node_id=\"x\",type=\"recovered\"} 7\nlivekit_fec_total{direction=\"incoming\",type=\"received\"} 40\n",
+        );
+        assert_eq!(m["livekit_fec_total#recovered"], 7.0);
+        assert_eq!(m["livekit_fec_total#received"], 40.0);
+        assert_eq!(m["livekit_fec_total|incoming"], 47.0);
     }
 
     #[test]

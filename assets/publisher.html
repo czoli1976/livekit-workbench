@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Workbench publisher</title>
+<style>
+  :root { color-scheme: light dark; --fg:#1c1c1a; --muted:#6b6a65; --bg:#f6f5f1; --card:#ffffff; --line:#dcdad2; --ok:#2e7d4f; --bad:#b3402a; }
+  @media (prefers-color-scheme: dark) { :root { --fg:#ecebe6; --muted:#a09f98; --bg:#161615; --card:#222220; --line:#3a3936; --ok:#6fcf97; --bad:#ef8f7a; } }
+  body { margin:0; font:14px/1.5 system-ui, sans-serif; color:var(--fg); background:var(--bg); }
+  main { max-width:1100px; margin:0 auto; padding:16px; }
+  h1 { font-size:18px; font-weight:600; margin:0 0 4px; }
+  #status { color:var(--muted); margin-bottom:12px; }
+  #status.ok { color:var(--ok); } #status.bad { color:var(--bad); }
+  canvas { width:100%; height:auto; border-radius:8px; background:#000; display:block; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:8px; margin:12px 0; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:8px 10px; }
+  .card .k { font-size:12px; color:var(--muted); } .card .v { font-size:17px; font-weight:600; word-break:break-word; }
+  code { font:12px/1.5 ui-monospace, monospace; }
+  .note { color:var(--muted); font-size:12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Workbench for LiveKit · Chrome publisher</h1>
+  <div id="status">Loading…</div>
+  <canvas id="src"></canvas>
+  <div class="grid">
+    <div class="card"><div class="k">Codecs negotiated</div><div class="v" id="codecs">-</div></div>
+    <div class="card"><div class="k">FlexFEC</div><div class="v" id="fec">-</div></div>
+    <div class="card"><div class="k">Encoder</div><div class="v" id="encoder">-</div></div>
+    <div class="card"><div class="k">Sent size · fps</div><div class="v" id="size">-</div></div>
+    <div class="card"><div class="k">Media sent</div><div class="v" id="media">-</div></div>
+    <div class="card"><div class="k">All bytes on the wire</div><div class="v" id="wire">-</div></div>
+    <div class="card"><div class="k">Retransmitted</div><div class="v" id="rtx">-</div></div>
+    <div class="card"><div class="k">NACK · PLI received</div><div class="v" id="nack">-</div></div>
+    <div class="card"><div class="k">Limited by</div><div class="v" id="limit">-</div></div>
+  </div>
+  <p class="note">Chrome was started by the Workbench app with the <code>WebRTC-FlexFEC-03</code> field trials, so it can offer FlexFEC-03 to the server. The difference between "all bytes on the wire" and "media sent" is mostly FEC plus RTCP and header overhead. This page reports these numbers to the app over the room's data channel (topic <code>workbench.publisher-stats</code>).</p>
+  <p class="note" id="ua"></p>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2.24.0/dist/livekit-client.umd.min.js"></script>
+<script>
+const TOPIC = 'workbench.publisher-stats';
+const $ = (id) => document.getElementById(id);
+const setStatus = (t, c) => { $('status').textContent = t; $('status').className = c || ''; };
+const p = new URLSearchParams(location.hash.slice(1));
+const url = p.get('url'), token = p.get('token');
+const codec = p.get('codec') || 'vp8';
+const width = +(p.get('w') || 1280), height = +(p.get('h') || 720), fps = +(p.get('fps') || 30);
+const mbps = +(p.get('mbps') || 3);
+const layers = p.get('layers') || 'single';
+$('ua').textContent = navigator.userAgent;
+
+function browserLabel() {
+  const m = navigator.userAgent.match(/(Edg|Chrome)\/(\d+)/);
+  return m ? (m[1] === 'Edg' ? 'Edge ' : 'Chrome ') + m[2] : 'browser';
+}
+
+// Synthetic source: a moving checkerboard with fresh blocks of grain each
+// frame, so the encoder has realistic work at every frame.
+const canvas = $('src');
+canvas.width = width; canvas.height = height;
+const ctx = canvas.getContext('2d');
+let t = 0;
+function draw() {
+  t += 1;
+  const cell = Math.max(16, Math.round(height / 12));
+  const off = (t * 4) % (cell * 2);
+  for (let y = -cell * 2; y < height + cell; y += cell) {
+    for (let x = -cell * 2; x < width + cell; x += cell) {
+      const on = (((x + off) / cell | 0) + ((y + off / 2) / cell | 0)) & 1;
+      ctx.fillStyle = on ? '#c8a27a' : '#5a3a20';
+      ctx.fillRect(x + off, y + off / 2, cell, cell);
+    }
+  }
+  for (let i = 0; i < 400; i++) {
+    const g = Math.random() * 255 | 0;
+    ctx.fillStyle = `rgb(${g},${g},${g})`;
+    ctx.fillRect(Math.random() * width, Math.random() * height, 6, 6);
+  }
+  ctx.fillStyle = '#fff';
+  ctx.font = `${Math.round(height / 18)}px system-ui`;
+  ctx.fillText(new Date().toISOString().slice(11, 23), 20, Math.round(height / 12));
+}
+setInterval(draw, 1000 / fps);
+draw();
+
+let room = null, pub = null, prev = null;
+
+async function sample() {
+  if (!pub || !pub.track || !pub.track.sender) return;
+  const sender = pub.track.sender;
+  const codecs = (sender.getParameters().codecs || []).map(c => c.mimeType.replace('video/', ''));
+  const report = await sender.getStats();
+  let media = 0, rtxBytes = 0, frames = 0, nack = 0, pli = 0, top = null, enc = '', limit = '', wire = 0, ts = 0;
+  report.forEach(s => {
+    if (s.type === 'outbound-rtp' && s.kind === 'video') {
+      media += s.bytesSent || 0;
+      rtxBytes += s.retransmittedBytesSent || 0;
+      nack += s.nackCount || 0;
+      pli += s.pliCount || 0;
+      ts = s.timestamp;
+      if (!top || (s.frameWidth || 0) > (top.frameWidth || 0)) top = s;
+      enc = s.encoderImplementation || enc;
+      limit = s.qualityLimitationReason || limit;
+    }
+    if (s.type === 'transport') wire = s.bytesSent || 0;
+  });
+  if (top) frames = top.framesSent || 0;
+  const out = {
+    codecs, flexfec: codecs.some(c => /flexfec/i.test(c)),
+    encoder: enc, width: top ? top.frameWidth || 0 : 0, height: top ? top.frameHeight || 0 : 0,
+    fps: 0, mediaMbps: 0, wireMbps: 0, rtxMbps: 0, nack, pli, limit, userAgent: browserLabel(),
+  };
+  if (prev && ts > prev.ts) {
+    const dt = (ts - prev.ts) / 1000;
+    out.fps = (frames - prev.frames) / dt;
+    out.mediaMbps = (media - prev.media) * 8 / dt / 1e6;
+    out.wireMbps = (wire - prev.wire) * 8 / dt / 1e6;
+    out.rtxMbps = (rtxBytes - prev.rtx) * 8 / dt / 1e6;
+  }
+  prev = { ts, frames, media, wire, rtx: rtxBytes };
+
+  $('codecs').textContent = codecs.join(', ') || '-';
+  $('fec').textContent = out.flexfec ? 'negotiated' : 'not negotiated';
+  $('fec').style.color = out.flexfec ? 'var(--ok)' : 'var(--bad)';
+  $('encoder').textContent = enc || '-';
+  $('size').textContent = out.width ? `${out.width}×${out.height} · ${out.fps.toFixed(1)}` : '-';
+  $('media').textContent = out.mediaMbps.toFixed(2) + ' Mbps';
+  $('wire').textContent = out.wireMbps.toFixed(2) + ' Mbps';
+  $('rtx').textContent = out.rtxMbps.toFixed(2) + ' Mbps';
+  $('nack').textContent = `${nack} · ${pli}`;
+  $('limit').textContent = limit || '-';
+  try {
+    await room.localParticipant.publishData(new TextEncoder().encode(JSON.stringify(out)), { reliable: false, topic: TOPIC });
+  } catch (e) { /* the app may have left */ }
+}
+
+async function main() {
+  if (!url || !token) { setStatus('This page needs a link from the Workbench app.', 'bad'); return; }
+  if (!window.LivekitClient) { setStatus('Could not load the LiveKit JavaScript SDK from the CDN.', 'bad'); return; }
+  const LK = window.LivekitClient;
+  room = new LK.Room({ adaptiveStream: false, dynacast: false });
+  room.on(LK.RoomEvent.Disconnected, (r) => setStatus('Disconnected (' + r + ')', 'bad'));
+  try {
+    setStatus('Connecting to ' + url + ' …');
+    await room.connect(url, token);
+    const stream = canvas.captureStream(fps);
+    const track = new LK.LocalVideoTrack(stream.getVideoTracks()[0]);
+    const opts = {
+      videoCodec: codec,
+      simulcast: layers === 'simulcast',
+      videoEncoding: { maxBitrate: Math.round(mbps * 1e6), maxFramerate: fps },
+      backupCodec: false,
+      source: LK.Track.Source.Camera,
+    };
+    if (layers !== 'single' && layers !== 'simulcast') opts.scalabilityMode = layers;
+    pub = await room.localParticipant.publishTrack(track, opts);
+    setStatus(`Publishing ${codec.toUpperCase()} ${width}×${height}@${fps}, ${layers}, cap ${mbps} Mbps as ${room.localParticipant.identity}`, 'ok');
+  } catch (e) { setStatus('Failed: ' + e.message, 'bad'); return; }
+  setInterval(sample, 1000);
+}
+main();
+</script>
+</body>
+</html>

@@ -420,6 +420,57 @@ impl App {
         }
     }
 
+    fn launch_chrome_publisher(&mut self) {
+        let Some(viewer) = self.viewer.as_ref() else {
+            return;
+        };
+        let Some((profile, secret)) = self.connection.clone() else {
+            return;
+        };
+        let room = self.session.shared.lock().room.clone();
+        self.invites += 1;
+        let identity = format!("{}{}", session::BROWSER_PUB_PREFIX, self.invites);
+        let cfg = self.form.to_config();
+        let (w, h) = cfg.publish_dims();
+        let codec = match cfg.codec {
+            livekit::options::VideoCodec::H264 => "h264",
+            livekit::options::VideoCodec::H265 => "h265",
+            livekit::options::VideoCodec::VP8 => "vp8",
+            livekit::options::VideoCodec::VP9 => "vp9",
+            livekit::options::VideoCodec::AV1 => "av1",
+        };
+        let layers = match &cfg.layering {
+            session::Layering::Single => "single".to_string(),
+            session::Layering::Simulcast => "simulcast".to_string(),
+            session::Layering::Svc(m) => m.clone(),
+        };
+        let token = match session::publisher_token(&profile.api_key, &secret, &room, &identity) {
+            Ok(t) => t,
+            Err(e) => {
+                self.notify(format!("Could not create a token: {e:#}"));
+                return;
+            }
+        };
+        let link = viewer.publisher_link(
+            &profile.connect_url(),
+            &token,
+            &crate::viewer::PublisherParams {
+                codec,
+                width: w,
+                height: h,
+                fps: cfg.fps.min(cfg.max_fps),
+                mbps: cfg.bitrate_bps as f64 / 1e6,
+                layers: &layers,
+            },
+        );
+        match crate::viewer::launch_chrome_with_flexfec(&link) {
+            Ok(()) => self.notify(format!(
+                "Chrome publisher {identity} starting with FlexFEC field trials"
+            )),
+            Err(e) => self.notify(format!("Could not start Chrome: {e}")),
+        }
+    }
+
     fn invite_link(&mut self) -> Option<String> {
         let viewer = self.viewer.as_ref()?;
         let (profile, secret) = self.connection.clone()?;

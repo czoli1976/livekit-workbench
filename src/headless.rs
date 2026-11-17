@@ -102,6 +102,89 @@ fn line(s: &Session, sec: u64) -> (u32, f64) {
     (me.height, me.fps)
 }
 
+fn chrome_pub(
+    url: &str,
+    key: &str,
+    secret: &str,
+    room: &str,
+    publish: &PublishConfig,
+    seconds: u64,
+    rt: &tokio::runtime::Handle,
+) -> i32 {
+    let session = Session::start(rt, Arc::new(|| {}));
+    session.connect(
+        ConnectConfig {
+            url: url.into(),
+            api_key: key.into(),
+            api_secret: secret.into(),
+            room: room.into(),
+            decode: true,
+            preview: false,
+        },
+        None,
+    );
+    if let Err(e) = wait_phase(&session, Phase::Connected, Duration::from_secs(20)) {
+        eprintln!("FAILED to connect: {e}");
+        return 2;
+    }
+    let viewer = crate::viewer::ViewerServer::start().expect("viewer server");
+    let token = crate::session::publisher_token(key, secret, room, "chrome-pub-1").expect("token");
+    let (w, h) = publish.publish_dims();
+    let codec = format!("{:?}", publish.codec).to_lowercase();
+    let layers = match &publish.layering {
+        Layering::Single => "single".to_string(),
+        Layering::Simulcast => "simulcast".to_string(),
+        Layering::Svc(m) => m.clone(),
+    };
+    let link = viewer.publisher_link(
+        url,
+        &token,
+        &crate::viewer::PublisherParams {
+            codec: &codec,
+            width: w,
+            height: h,
+            fps: publish.fps,
+            mbps: publish.bitrate_bps as f64 / 1e6,
+            layers: &layers,
+        },
+    );
+    if let Err(e) = crate::viewer::launch_chrome_with_flexfec(&link) {
+        eprintln!("FAILED to start Chrome: {e}");
+        return 2;
+    }
+    let prom_port = url.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()).map(|p| p + 1000);
+    let mut flexfec = false;
+    for sec in 1..=seconds {
+        std::thread::sleep(Duration::from_secs(1));
+        let snap = session.shared.lock().snapshot.clone();
+        let me = snap.self_receive().cloned().unwrap_or_default();
+        if let Some(b) = &snap.browser_pub {
+            flexfec |= b.flexfec;
+            println!(
+                "{sec:>3}s chrome: {:?} flexfec={} {}x{}@{:.0} media {:.2} wire {:.2} rtx {:.2} nack {} | app recv {}x{}@{:.1} {}",
+                b.codecs, b.flexfec, b.width, b.height, b.fps, b.media_mbps, b.wire_mbps, b.rtx_mbps, b.nack, me.width, me.height, me.fps, me.decoder
+            );
+        } else {
+            println!("{sec:>3}s waiting for the Chrome publisher…");
+        }
+    }
+    if let Some(port) = prom_port {
+        if let Ok(text) = reqwest::blocking::get(format!("http://127.0.0.1:{port}/metrics")).and_then(|r| r.text()) {
+            let m = crate::local_server::parse_prometheus(&text);
+            println!(
+                "server fec: received {:?} recovered {:?} discarded {:?}",
+                m.get("livekit_fec_total#received"),
+                m.get("livekit_fec_total#recovered"),
+                m.get("livekit_fec_total#discarded")
+            );
+        }
+    }
+    session.disconnect();
+    std::thread::sleep(Duration::from_millis(500));
+    println!("RESULT: {}", if flexfec { "flexfec negotiated" } else { "flexfec NOT negotiated" });
+    0
+}
+
 pub fn run(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help") {
         println!(
@@ -202,6 +285,10 @@ pub fn run(args: &[String]) -> i32 {
     } else {
         None
     };
+    // --chrome-pub: receive a Chrome publisher (FlexFEC field trials) instead of publishing.
+    if args.iter().any(|a| a == "--chrome-pub") {
+        return chrome_pub(&url, &key, &secret, &room, &publish, seconds, rt.handle());
+    }
     session.connect(
         ConnectConfig {
             url,

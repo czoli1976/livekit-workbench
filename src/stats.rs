@@ -139,6 +139,8 @@ pub struct Snapshot {
     /// The server's rating of the publisher's and the subscriber's connection.
     pub server_quality_pub: Option<String>,
     pub server_quality_sub: Option<String>,
+    /// A Chrome publisher started from the app, as its page reports itself.
+    pub browser_pub: Option<BrowserPublisher>,
     pub fec_negotiated: bool,
     /// Which FEC is in use on the publisher connection: "FlexFEC", "ULPFEC", "RED".
     pub fec: Vec<String>,
@@ -436,6 +438,25 @@ fn candidate_label(kind: Option<String>, protocol: &str) -> String {
     } else {
         format!("{kind}/{}", protocol.to_lowercase())
     }
+}
+
+/// What the Chrome publisher page reports about its own sending.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct BrowserPublisher {
+    pub who: String,
+    pub user_agent: String,
+    pub codecs: Vec<String>,
+    pub flexfec: bool,
+    pub encoder: String,
+    pub width: u32,
+    pub height: u32,
+    pub fps: f64,
+    pub media_mbps: f64,
+    pub wire_mbps: f64,
+    pub rtx_mbps: f64,
+    pub nack: u64,
+    pub pli: u64,
+    pub limit: String,
 }
 
 pub fn rate_mbps(now: u64, before: u64, dt: f64) -> f64 {

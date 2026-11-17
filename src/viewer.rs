@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const PAGE: &str = include_str!("../assets/viewer.html");
+const PUBLISHER_PAGE: &str = include_str!("../assets/publisher.html");
 
 /// A running viewer server. Dropping it stops the server.
 pub struct ViewerServer {
@@ -36,11 +37,18 @@ impl ViewerServer {
                         let n = stream.read(&mut buf).unwrap_or(0);
                         let request = String::from_utf8_lossy(&buf[..n]);
                         let path = request.split_whitespace().nth(1).unwrap_or("/");
-                        let response = if path == "/" || path.starts_with("/?") || path == "/index.html" {
+                        let page = if path == "/" || path.starts_with("/?") || path == "/index.html" {
+                            Some(PAGE)
+                        } else if path == "/publish" || path.starts_with("/publish?") {
+                            Some(PUBLISHER_PAGE)
+                        } else {
+                            None
+                        };
+                        let response = if let Some(page) = page {
                             format!(
                                 "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{}",
-                                PAGE.len(),
-                                PAGE
+                                page.len(),
+                                page
                             )
                         } else {
                             "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
@@ -148,6 +156,91 @@ fn ok_status(s: std::process::ExitStatus) -> std::io::Result<()> {
             "browser launcher exited with {s}"
         )))
     }
+}
+
+/// Settings for the Chrome publisher page, sent in the URL fragment.
+pub struct PublisherParams<'a> {
+    pub codec: &'a str,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub mbps: f64,
+    /// "single", "simulcast" or a scalability mode such as "L3T3_KEY".
+    pub layers: &'a str,
+}
+
+/// The FlexFEC field trials Chrome needs to offer and send FlexFEC-03.
+pub const FLEXFEC_TRIALS: &str = "WebRTC-FlexFEC-03/Enabled/WebRTC-FlexFEC-03-Advertised/Enabled/";
+
+impl ViewerServer {
+    pub fn publisher_link(&self, livekit_url: &str, token: &str, p: &PublisherParams) -> String {
+        format!(
+            "http://127.0.0.1:{}/publish#url={}&token={}&codec={}&w={}&h={}&fps={}&mbps={}&layers={}",
+            self.port,
+            encode(livekit_url),
+            encode(token),
+            encode(p.codec),
+            p.width,
+            p.height,
+            p.fps,
+            p.mbps,
+            encode(p.layers)
+        )
+    }
+}
+
+/// The Chrome executable, if installed in the usual place.
+pub fn chrome_path() -> Option<std::path::PathBuf> {
+    let candidates: Vec<std::path::PathBuf> = if cfg!(target_os = "macos") {
+        vec!["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".into()]
+    } else if cfg!(target_os = "windows") {
+        ["ProgramFiles", "ProgramFiles(x86)", "LocalAppData"]
+            .iter()
+            .filter_map(std::env::var_os)
+            .map(|d| std::path::PathBuf::from(d).join("Google\\Chrome\\Application\\chrome.exe"))
+            .collect()
+    } else {
+        [
+            "google-chrome",
+            "google-chrome-stable",
+            "chromium",
+            "chromium-browser",
+        ]
+        .iter()
+        .filter_map(|n| {
+            std::env::var_os("PATH").and_then(|paths| {
+                std::env::split_paths(&paths)
+                    .map(|d| d.join(n))
+                    .find(|p| p.is_file())
+            })
+        })
+        .collect()
+    };
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+/// Start a separate Chrome instance with the FlexFEC field trials, on its own
+/// profile so the flags apply even when Chrome is already open.
+pub fn launch_chrome_with_flexfec(url: &str) -> std::io::Result<()> {
+    let chrome =
+        chrome_path().ok_or_else(|| std::io::Error::other("Google Chrome was not found"))?;
+    let profile = directories::ProjectDirs::from("io", "czoli1976", "livekit-workbench")
+        .map(|d| d.data_dir().join("chrome-flexfec"))
+        .unwrap_or_else(|| std::env::temp_dir().join("workbench-chrome-flexfec"));
+    std::fs::create_dir_all(&profile)?;
+    std::process::Command::new(chrome)
+        .arg(format!("--user-data-dir={}", profile.display()))
+        .arg(format!("--force-fieldtrials={FLEXFEC_TRIALS}"))
+        .args([
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--new-window",
+        ])
+        .arg(url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
 }
 
 /// The command name for Chrome on this OS, for "Open in Chrome".
