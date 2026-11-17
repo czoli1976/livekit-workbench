@@ -857,7 +857,9 @@ impl App {
         );
         if ui
             .add_enabled(!busy, egui::Button::new("Check version").small())
-            .on_hover_text("Compare the installed livekit-server with LiveKit's latest GitHub release.")
+            .on_hover_text(
+                "Compare the installed livekit-server with LiveKit's latest GitHub release.",
+            )
             .clicked()
         {
             self.check_server_update();
@@ -920,7 +922,11 @@ impl App {
                 }
             }
             UpdateState::Checking => {
-                ui.label(RichText::new("checking for updates…").small().color(theme::MUTED));
+                ui.label(
+                    RichText::new("checking for updates…")
+                        .small()
+                        .color(theme::MUTED),
+                );
             }
             UpdateState::UpToDate(v) => {
                 ui.label(RichText::new("✓ latest").small().color(theme::GREEN_TEXT))

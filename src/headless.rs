@@ -152,7 +152,11 @@ fn chrome_pub(
         eprintln!("FAILED to start Chrome: {e}");
         return 2;
     }
-    let prom_port = url.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()).map(|p| p + 1000);
+    let prom_port = url
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse::<u16>().ok())
+        .map(|p| p + 1000);
     let mut flexfec = false;
     for sec in 1..=seconds {
         std::thread::sleep(Duration::from_secs(1));
@@ -169,7 +173,9 @@ fn chrome_pub(
         }
     }
     if let Some(port) = prom_port {
-        if let Ok(text) = reqwest::blocking::get(format!("http://127.0.0.1:{port}/metrics")).and_then(|r| r.text()) {
+        if let Ok(text) = reqwest::blocking::get(format!("http://127.0.0.1:{port}/metrics"))
+            .and_then(|r| r.text())
+        {
             let m = crate::local_server::parse_prometheus(&text);
             println!(
                 "server fec: received {:?} recovered {:?} discarded {:?}",
@@ -181,7 +187,14 @@ fn chrome_pub(
     }
     session.disconnect();
     std::thread::sleep(Duration::from_millis(500));
-    println!("RESULT: {}", if flexfec { "flexfec negotiated" } else { "flexfec NOT negotiated" });
+    println!(
+        "RESULT: {}",
+        if flexfec {
+            "flexfec negotiated"
+        } else {
+            "flexfec NOT negotiated"
+        }
+    );
     0
 }
 

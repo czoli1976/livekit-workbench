@@ -135,7 +135,8 @@ impl App {
         let mut close = false;
         ctx.show_viewport_immediate(id, builder, |ui, _| {
             // A child window repaints only when asked: refresh with each sample.
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(500));
             egui::Panel::top("stats-top")
                 .frame(super::theme::top_frame())
                 .show(ui, |ui| {

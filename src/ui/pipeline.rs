@@ -946,7 +946,8 @@ fn show_preview_window(
     let mut close = false;
     ctx.show_viewport_immediate(egui::ViewportId::from_hash_of(key), builder, |ui, _| {
         // A child window repaints only when asked: keep it moving with the video.
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(100));
         egui::CentralPanel::no_frame().show(ui, |ui| {
             let size = ui.available_size();
             let r = pane.paint(ui, slot, &format!("{key}-window"), size, placeholder);
