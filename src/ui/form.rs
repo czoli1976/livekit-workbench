@@ -183,6 +183,7 @@ impl App {
                 .unwrap_or_else(|| format!("Camera {i}")),
             SourceKind::Pattern => "Synthetic: moving pattern".into(),
             SourceKind::Detail => "Synthetic: detailed motion".into(),
+            SourceKind::Screen => "Screen".into(),
         }
     }
 
@@ -242,6 +243,12 @@ impl App {
                             .on_hover_text("A moving pattern plus fresh grain every frame: needs a realistic bitrate, like a camera.");
                         ui.selectable_value(&mut self.form.source, SourceKind::Pattern, "Synthetic: moving pattern")
                             .on_hover_text("A scrolling texture: cheap to encode, needs little bitrate.");
+                        ui.selectable_value(&mut self.form.source, SourceKind::Screen, "Screen")
+                            .on_hover_text(if cfg!(target_os = "macos") {
+                                "A display or window, chosen in macOS's picker when capture starts (at Connect or Publish)."
+                            } else {
+                                "The main screen; on Linux with Wayland, the desktop picker asks which."
+                            });
                         for c in self.cameras.clone() {
                             ui.selectable_value(&mut self.form.source, SourceKind::Camera(c.index), c.name);
                         }
@@ -270,7 +277,7 @@ impl App {
                         }
                     });
                 }
-                SourceKind::Pattern | SourceKind::Detail => {
+                SourceKind::Pattern | SourceKind::Detail | SourceKind::Screen => {
                     ui.horizontal(|ui| {
                         egui::ComboBox::from_id_salt("syn-size")
                             .selected_text(size_name(self.form.capture))

@@ -99,6 +99,7 @@ impl App {
             },
             SourceKind::Pattern => "pattern".into(),
             SourceKind::Detail => "detail".into(),
+            SourceKind::Screen => "screen".into(),
         };
         Saved {
             source,
@@ -137,6 +138,8 @@ impl App {
             f.source = SourceKind::Pattern;
         } else if s.source == "detail" {
             f.source = SourceKind::Detail;
+        } else if s.source == "screen" {
+            f.source = SourceKind::Screen;
         }
         if s.capture.0 > 0 && s.capture.1 > 0 {
             f.capture = s.capture;
