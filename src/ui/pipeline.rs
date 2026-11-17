@@ -65,7 +65,9 @@ impl PreviewPane {
         placeholder: &str,
     ) -> egui::Rect {
         {
-            let p = slot.lock();
+            let mut p = slot.lock();
+            // Ask for frames as wide as the pixels this pane covers.
+            p.want_w = (size.x * ui.ctx().pixels_per_point()).round() as u32;
             if p.seq != self.seen {
                 self.seen = p.seq;
                 if p.w > 0 && p.rgba.len() == p.w * p.h * 4 {
@@ -700,6 +702,15 @@ impl App {
                             .wrap(),
                         );
                     }
+                    // The screen is only captured while publishing: macOS asks
+                    // which screen each time capture starts.
+                    let empty = if self.form.source == crate::capture::SourceKind::Screen
+                        && self.session.phase() != Phase::Publishing
+                    {
+                        "Screen: shown once you publish (macOS asks which screen or window)"
+                    } else {
+                        "No local video"
+                    };
                     if self.local_undocked {
                         self.docked_placeholder(ui, width, height, true);
                     } else {
@@ -708,7 +719,7 @@ impl App {
                             &local_slot,
                             "local",
                             egui::vec2(width, height),
-                            "No local video",
+                            empty,
                         );
                     }
                 });

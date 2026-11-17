@@ -196,6 +196,7 @@ fn run_screen(
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let kind = DesktopCaptureSourceType::Screen;
     let use_picker = cfg!(target_os = "macos") || wayland;
+    screen_access()?;
     let mut options = DesktopCapturerOptions::new(kind);
     options.set_include_cursor(true);
     let mut capturer = DesktopCapturer::new(options).ok_or_else(|| {
@@ -215,10 +216,14 @@ fn run_screen(
         )
     };
 
-    let (tx, rx) = sync_channel::<std::result::Result<I420Buffer, String>>(2);
+    // Each frame with the screen's own size, before scaling.
+    let (tx, rx) = sync_channel::<std::result::Result<(I420Buffer, (u32, u32)), String>>(2);
     capturer.start_capture(source, move |result| {
         let msg = match result {
-            Ok(frame) => Ok(desktop_to_i420(&frame, width, height)),
+            Ok(frame) => Ok((
+                desktop_to_i420(&frame, width, height),
+                (frame.width() as u32, frame.height() as u32),
+            )),
             Err(livekit::webrtc::desktop_capturer::CaptureError::Temporary) => return,
             Err(e) => Err(format!("{e:?}")),
         };
@@ -234,18 +239,29 @@ fn run_screen(
         capturer.capture_frame();
         loop {
             match rx.try_recv() {
-                Ok(Ok(buf)) => {
+                Ok(Ok((buf, (nw, nh)))) => {
                     if let Some(f) = on_info.take() {
+                        let note = if (nw, nh) == (buf.width(), buf.height()) {
+                            format!("screen at its own size {nw}×{nh}")
+                        } else {
+                            format!("screen {nw}×{nh}, scaled to fit {width}×{height}")
+                        };
                         f(CaptureInfo {
                             width: buf.width(),
                             height: buf.height(),
-                            note: "screen".into(),
+                            note,
                         });
                     }
                     last_frame = Some(Instant::now());
                     on_frame(buf);
                 }
-                Ok(Err(e)) => return Err(anyhow!("screen capture stopped: {e}")),
+                Ok(Err(e)) => {
+                    return Err(anyhow!(if last_frame.is_none() {
+                        format!("screen capture failed ({e}): no screen was chosen in the picker, or {SCREEN_PERMISSION_HELP}")
+                    } else {
+                        format!("screen capture stopped ({e})")
+                    }))
+                }
                 Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
             }
         }
@@ -321,6 +337,29 @@ pub fn fit_within(w: u32, h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(8);
 /// Frames stopped arriving for this long: give up.
 const FRAME_GAP_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[cfg(target_os = "macos")]
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGPreflightScreenCaptureAccess() -> bool;
+    fn CGRequestScreenCaptureAccess() -> bool;
+}
+
+const SCREEN_PERMISSION_HELP: &str = "screen recording is not allowed for this app. Allow it in System Settings › Privacy & Security › Screen & System Audio Recording, then restart the app";
+
+/// Whether this process may record the screen. On macOS the first refusal
+/// also asks the system to show its permission prompt.
+pub fn screen_access() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    // SAFETY: plain CoreGraphics calls with no arguments.
+    unsafe {
+        if !CGPreflightScreenCaptureAccess() {
+            CGRequestScreenCaptureAccess();
+            return Err(anyhow!(SCREEN_PERMISSION_HELP));
+        }
+    }
+    Ok(())
+}
 
 /// Is the app allowed to use the camera? On macOS the answer belongs to the
 /// app bundle, or to the terminal the binary was started from.

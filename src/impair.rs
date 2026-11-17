@@ -70,6 +70,10 @@ pub struct LinkCounters {
 pub struct Link {
     pub settings: Arc<Mutex<Impairment>>,
     pub counters: Arc<Mutex<LinkCounters>>,
+    /// Impair only once the connection is up. Delay during WebRTC m150's
+    /// connection setup (ICE plus the DTLS handshake carried in STUN) made
+    /// the publisher sometimes never connect.
+    pub armed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// The publisher's uplink and the subscriber's downlink.
@@ -175,7 +179,11 @@ async fn shaper(
         tokio::select! {
             msg = rx.recv() => {
                 let Some((data, addr)) = msg else { break };
-                let s = *link.settings.lock();
+                let s = if link.armed.load(std::sync::atomic::Ordering::Relaxed) {
+                    *link.settings.lock()
+                } else {
+                    Impairment::default()
+                };
                 let now = Instant::now();
                 if s.is_clear() && queue.is_empty() {
                     let _ = sock.send_to(&data, addr).await;
@@ -464,5 +472,39 @@ mod tests {
             .filter(|_| matches!(s.admit(&imp, 100, now), Verdict::Lost))
             .count();
         assert!((1600..2400).contains(&lost), "{lost}");
+    }
+}
+
+#[cfg(test)]
+mod shaped_conn_tests {
+    use super::*;
+
+    /// Packets sent through a delayed link all arrive, in order, after the delay.
+    #[tokio::test]
+    async fn delayed_packets_arrive_in_order() {
+        let link = Link::default();
+        *link.settings.lock() = Impairment {
+            delay_ms: 40,
+            ..Default::default()
+        };
+        link.armed.store(true, std::sync::atomic::Ordering::Relaxed);
+        let sink = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let to = sink.local_addr().unwrap();
+        let src = Arc::new(UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap());
+        let conn = ShapedConn::new(src, link.clone());
+        let t0 = Instant::now();
+        for i in 0..20u8 {
+            conn.send_to(&[i], to).await.unwrap();
+        }
+        let mut buf = [0u8; 4];
+        for i in 0..20u8 {
+            let (n, _) = tokio::time::timeout(Duration::from_secs(2), sink.recv_from(&mut buf))
+                .await
+                .expect("packet arrives")
+                .unwrap();
+            assert_eq!((n, buf[0]), (1, i));
+        }
+        assert!(t0.elapsed() >= Duration::from_millis(40));
+        assert_eq!(link.counters.lock().passed, 20);
     }
 }

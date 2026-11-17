@@ -16,6 +16,7 @@
 //!     --audio tone|MICROPHONE-NAME     also publish audio, and require it to arrive
 //!     --audio-kbps N                   Opus bitrate cap (default 32)
 //!     --no-dtx, --no-red               turn off Opus DTX or redundant audio
+//!     --no-aec, --no-ns, --no-agc      turn off WebRTC's audio processing
 //!     --up LOSS%,DELAY,JITTER,KBPS     impair the publisher's uplink (in-app relay)
 //!     --down LOSS%,DELAY,JITTER,KBPS   impair the subscriber's downlink
 //!     --lifecycle                      also exercise unpublish, publish, republish, switch source
@@ -33,6 +34,24 @@ use crate::capture::SourceKind;
 use crate::session::{
     AudioConfig, AudioInput, ConnectConfig, Layering, Phase, PublishConfig, Session,
 };
+
+/// "detail", "pattern", "screen" or "camera" (the first camera).
+fn parse_source(s: &str) -> Result<SourceKind, String> {
+    match s {
+        "pattern" => Ok(SourceKind::Pattern),
+        "detail" => Ok(SourceKind::Detail),
+        "screen" => Ok(SourceKind::Screen),
+        // An explicit camera request must test a camera, never fall back.
+        "camera" => crate::capture::list_cameras()
+            .map_err(|e| format!("--source camera: {e:#}"))?
+            .first()
+            .map(|c| SourceKind::Camera(c.index))
+            .ok_or_else(|| "--source camera: no camera found".to_string()),
+        other => Err(format!(
+            "unknown source \"{other}\": detail, pattern, camera or screen"
+        )),
+    }
+}
 
 /// "LOSS%,DELAY,JITTER,KBPS", trailing fields optional: "2" or "1,40,10,1500".
 /// A field that is given must be a valid number.
@@ -298,10 +317,28 @@ pub fn run(args: &[String]) -> i32 {
         "simulcast" => Layering::Simulcast,
         m => Layering::Svc(m.to_string()),
     };
-    let source = if opt(args, "--source") == Some("pattern") {
-        SourceKind::Pattern
-    } else {
-        SourceKind::Detail
+    let source = match opt(args, "--source").map(parse_source) {
+        None => SourceKind::Detail,
+        Some(Ok(s)) => s,
+        Some(Err(e)) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    // Check --switch up front, so a typo fails before connecting.
+    let switches: Vec<(String, SourceKind)> = match opt(args, "--switch")
+        .map(|l| {
+            l.split(',')
+                .map(|n| parse_source(n).map(|s| (n.to_string(), s)))
+                .collect::<Result<Vec<_>, String>>()
+        })
+        .transpose()
+    {
+        Ok(v) => v.unwrap_or_default(),
+        Err(e) => {
+            eprintln!("--switch: {e}");
+            return 2;
+        }
     };
     let seconds: u64 = opt(args, "--seconds")
         .and_then(|v| v.parse().ok())
@@ -345,7 +382,9 @@ pub fn run(args: &[String]) -> i32 {
                 * 1000,
             dtx: !args.iter().any(|a| a == "--no-dtx"),
             red: !args.iter().any(|a| a == "--no-red"),
-            ..Default::default()
+            echo_cancellation: !args.iter().any(|a| a == "--no-aec"),
+            noise_suppression: !args.iter().any(|a| a == "--no-ns"),
+            auto_gain: !args.iter().any(|a| a == "--no-agc"),
         },
     };
     let parsed = (
@@ -419,7 +458,10 @@ pub fn run(args: &[String]) -> i32 {
     for sec in 1..=seconds {
         std::thread::sleep(Duration::from_secs(1));
         let (rh, rfps) = line(&session, sec);
-        if rh > 0 && rfps > 0.0 {
+        // Frames must be captured too: with a failed input WebRTC keeps
+        // repeating the last frame, which would otherwise look received.
+        let captured = session.shared.lock().snapshot.capture.fps > 0.0;
+        if rh > 0 && rfps > 0.0 && captured {
             received = true;
         }
         if let Some(e) = session.shared.lock().error.clone() {
@@ -427,7 +469,16 @@ pub fn run(args: &[String]) -> i32 {
         }
     }
 
-    let mut ok = received;
+    let input_failed = session
+        .shared
+        .lock()
+        .error
+        .as_deref()
+        .is_some_and(|e| e.starts_with("Input stopped"));
+    if input_failed {
+        println!("input failed during the run");
+    }
+    let mut ok = received && !input_failed;
     if publish.audio.input != AudioInput::Off {
         let a = session.shared.lock().snapshot.audio.clone();
         let heard = a.receiving && a.recv_kbps > 0.0;
@@ -504,6 +555,41 @@ pub fn run(args: &[String]) -> i32 {
         let (rh, rfps) = line(&session, 0);
         println!("after source switch: receiving {rh}p at {rfps:.1} fps");
         ok &= rh > 0 && rfps > 0.0;
+    }
+
+    // --switch screen,camera: switch the live input in turn, 8 s each.
+    for (name, kind) in &switches {
+        {
+            let mut next = publish.clone();
+            next.source = kind.clone();
+            session.switch_source(next.clone());
+            let mut captured = false;
+            for sec in 1..=8 {
+                std::thread::sleep(Duration::from_secs(1));
+                let snap = session.shared.lock().snapshot.clone();
+                let err = session.shared.lock().error.clone();
+                println!(
+                    "switch {name} {sec}s: capture {}x{}@{:.1} ({}) phase {:?} error {:?}",
+                    snap.capture.width,
+                    snap.capture.height,
+                    snap.capture.fps,
+                    snap.capture.note,
+                    session.phase(),
+                    err
+                );
+                captured |= sec >= 3 && snap.capture.fps > 0.0 && err.is_none();
+            }
+            // Each switch must end up capturing the requested input.
+            let active = session
+                .shared
+                .lock()
+                .active_publish
+                .as_ref()
+                .map(|p| p.source.clone());
+            let switched = captured && active.as_ref() == Some(kind);
+            println!("switch {name}: {}", if switched { "ok" } else { "FAILED" });
+            ok &= switched;
+        }
     }
 
     let started = Instant::now();

@@ -91,7 +91,7 @@ While publishing, republish changes collect in a banner at the top of the panel;
 
 What the settings do:
 
-- **Input:** a camera, *Synthetic: detailed motion* (changes every pixel, needs a realistic bitrate), *Synthetic: moving pattern* (cheap to encode) or *Screen*. The input shows in the local preview as soon as you pick it, before you connect. *Screen* opens the system picker (macOS, Wayland) when publishing starts, and sets the track source to *Screen share* and the content hint to *Detail / text*. On macOS the app needs Screen Recording permission.
+- **Input:** a camera, *Synthetic: detailed motion* (changes every pixel, needs a realistic bitrate) or *Synthetic: moving pattern* (cheap to encode). The input shows in the local preview as soon as you pick it, before you connect. If an input fails while publishing, the track stays published: pick another input. Screen sharing is hidden for now; the headless mode can still test it with `--source screen`.
 - **Publish size:** frames are scaled to this before the encoder. Pick a fixed size to switch inputs live.
 - **Track source:** *Screen share* makes the SDK start WebRTC's bitrate estimate near the cap instead of at most 1 Mbps.
 - **Content hint:** *Motion* or *Detail / text*, the equivalent of the W3C `contentHint`. Detail / text turns *Balanced* into *keep resolution*, and changes encoder settings for VideoToolbox and OpenH264; hover it for the details.
@@ -101,7 +101,7 @@ What the settings do:
 - **Audio** (REPUBLISH): *Off*, *Synthetic tone* or a microphone.
   - *Synthetic tone* is a 440 Hz beep, 0.6 s on and 0.4 s off. It needs no microphone and plays nothing.
   - With a microphone, the app plays the audio it receives, about a round trip late. Use headphones, or keep echo cancellation (AEC) on.
-  - Opus settings: the bitrate cap, *DTX* (almost nothing is sent during silence) and *RED* (each packet also carries the previous frame, which roughly doubles the bitrate).
+  - Opus settings: the bitrate cap (a slider from 6 to 510 kbps; in mono WebRTC's Opus stops rising at about 200 kbps), *DTX* (almost nothing is sent during silence) and *RED* (each packet also carries the previous frame, which roughly doubles the bitrate).
   - Microphones also have AEC, AGC and noise suppression switches.
   - Audio stats for both directions appear under the pipeline and in Stats: bitrate, loss, jitter, jitter buffer, and the share of audio the receiver had to invent ("concealed").
 - **Network impairment** (RECONNECT, then live): see [Network impairment](#network-impairment).
@@ -116,7 +116,7 @@ The app remembers these settings and the view choices between launches. They are
 - **Publisher uplink** shapes what the publisher sends to the server.
 - **Subscriber downlink** shapes what the server sends to the subscriber.
 
-Each direction has four settings, and you can change them live while connected:
+Impairment starts once both connections are up: delay during WebRTC's connection setup sometimes stopped the publisher connecting. Each direction has four settings, and you can change them live while connected:
 
 - **Loss:** random, in percent.
 - **Delay:** fixed delay, in ms.
@@ -212,7 +212,7 @@ Headless mode publishes and receives without a window, prints one line of stats 
 - `--detail-hint`
 - `--chrome-pub`: Chrome publisher with FlexFEC.
 - `--e2ee PASSPHRASE`
-- `--audio tone`: the run also fails if audio does not arrive. Add `--audio-kbps 24`, `--no-dtx` or `--no-red` to change the Opus settings.
+- `--audio tone`: the run also fails if audio does not arrive. Add `--audio-kbps 24`, `--no-dtx`, `--no-red`, `--no-aec`, `--no-ns` or `--no-agc` to change the Opus settings or WebRTC's processing.
 - `--up 5,40,10` and `--down 0,0,0,1000`: impairment as `LOSS%,DELAY,JITTER,KBPS`; trailing fields are optional.
 
 ## Troubleshooting

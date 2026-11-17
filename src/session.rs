@@ -209,6 +209,10 @@ pub struct Preview {
     pub rgba: Vec<u8>,
     pub seq: u64,
     pub on_update: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Width in pixels the UI draws this preview at (0: not drawn yet).
+    /// Frames are scaled to it, up to the frame's own width, so an undocked
+    /// preview is as sharp as the frame itself.
+    pub want_w: u32,
 }
 
 pub type SharedPreview = Arc<Mutex<Preview>>;
@@ -348,7 +352,7 @@ struct PublishedAudio {
     track: LocalAudioTrack,
     sid: TrackSid,
     /// The tone generator, when the input is the tone.
-    task: Option<tokio::task::JoinHandle<()>>,
+    task: Option<ToneTask>,
     /// Holds the microphone (and speaker playout) open while published.
     platform: Option<PlatformAudio>,
     label: String,
@@ -602,6 +606,11 @@ impl Engine {
         let result = self.connect_rooms(cfg, relay.as_ref()).await;
         match result {
             Ok(mut conn) => {
+                if relay.is_some() {
+                    let links = self.shared.lock().links.clone();
+                    links.up.armed.store(true, Ordering::Relaxed);
+                    links.down.armed.store(true, Ordering::Relaxed);
+                }
                 conn.relay = relay;
                 self.conn = Some(conn);
                 Ok(())
@@ -890,7 +899,20 @@ impl Engine {
             Err(e) => format!("Could not restart capture: {e}"),
         };
         let active = p.cfg.clone();
-        self.shared.lock().active_publish = Some(active);
+        let restarted = p.thread.is_some();
+        {
+            let mut sh = self.shared.lock();
+            sh.active_publish = Some(active);
+            // A new input clears the previous input's failure.
+            if restarted
+                && sh
+                    .error
+                    .as_deref()
+                    .is_some_and(|e| e.starts_with("Input stopped"))
+            {
+                sh.error = None;
+            }
+        }
         self.event(msg);
     }
 
@@ -977,6 +999,11 @@ impl Engine {
         // Both rooms keep their event receivers drained meanwhile (see connect).
         let (pub_room, sub_room, pub_drain) = (conn.pub_room, conn.sub_room, conn.pub_drain);
         let relay = conn.relay.take();
+        {
+            let links = self.shared.lock().links.clone();
+            links.up.armed.store(false, Ordering::Relaxed);
+            links.down.armed.store(false, Ordering::Relaxed);
+        }
         let mut sub_events = conn.sub_events;
         let closing = self.shared.lock().closing.clone();
         closing.fetch_add(1, Ordering::SeqCst);
@@ -1641,6 +1668,7 @@ impl Engine {
                     subscribed: me.is_some(),
                     target_fps: p.cfg.fps.min(p.cfg.max_fps) as f64,
                     capture_fps: snap.capture.fps,
+                    screen: p.cfg.source == SourceKind::Screen,
                     seconds_since_capture_frame: p.last_frame.lock().elapsed().as_secs_f64(),
                     encode_fps: top.as_ref().map(|t| t.fps).unwrap_or(0.0),
                     encode_ms_per_frame: top.as_ref().map(|t| t.encode_ms).unwrap_or(0.0),
@@ -1716,9 +1744,14 @@ impl Engine {
         };
         (self.repaint)();
 
+        // An input that fails leaves the track published, so another input
+        // can be switched in live; ending the publish here made later input
+        // changes silently do nothing.
         if let Some(e) = capture_error {
-            self.set_error(Some(format!("Capture stopped: {e}")));
-            self.unpublish().await;
+            self.set_error(Some(format!(
+                "Input stopped: {e}. The track is still published: choose another input."
+            )));
+            self.event(format!("Input stopped: {e}"));
         }
     }
 }
@@ -1754,25 +1787,43 @@ async fn publish_audio(room: &Room, cfg: &AudioConfig) -> Result<PublishedAudio,
         AudioInput::Tone => {
             let src = NativeAudioSource::new(AudioSourceOptions::default(), RATE, 1, 100);
             let feed = src.clone();
-            let task = tokio::spawn(async move {
-                let mut n: u64 = 0;
-                loop {
-                    let frame = AudioFrame {
-                        data: tone_frame(n, RATE).into(),
-                        sample_rate: RATE,
-                        num_channels: 1,
-                        samples_per_channel: RATE / 100,
-                    };
-                    // Waits while the source's queue is full, so this runs in real time.
-                    if feed.capture_frame(&frame).await.is_err() {
-                        break;
+            let stop = Arc::new(AtomicBool::new(false));
+            let stop_flag = stop.clone();
+            let (aec, agc, ns) = (cfg.echo_cancellation, cfg.auto_gain, cfg.noise_suppression);
+            // WebRTC's processing only runs by itself on audio the device
+            // captures, so the tone goes through the same module (APM) here.
+            // The module is not Send: it lives on this thread.
+            std::thread::Builder::new()
+                .name("audio-tone".into())
+                .spawn(move || {
+                    let mut apm = (aec || agc || ns).then(|| {
+                        livekit::webrtc::native::apm::AudioProcessingModule::new(
+                            aec, agc, false, ns,
+                        )
+                    });
+                    let mut n: u64 = 0;
+                    while !stop_flag.load(Ordering::Relaxed) {
+                        let mut data = tone_frame(n, RATE);
+                        if let Some(apm) = apm.as_mut() {
+                            let _ = apm.process_stream(&mut data, RATE as i32, 1);
+                        }
+                        let frame = AudioFrame {
+                            data: data.into(),
+                            sample_rate: RATE,
+                            num_channels: 1,
+                            samples_per_channel: RATE / 100,
+                        };
+                        // Waits while the source's queue is full, so this runs in real time.
+                        if futures::executor::block_on(feed.capture_frame(&frame)).is_err() {
+                            break;
+                        }
+                        n += 1;
                     }
-                    n += 1;
-                }
-            });
+                })
+                .map_err(|e| format!("starting the tone: {e}"))?;
             (
                 RtcAudioSource::Native(src),
-                Some(task),
+                Some(ToneTask(stop)),
                 None,
                 "synthetic tone".to_string(),
             )
@@ -1787,9 +1838,24 @@ async fn publish_audio(room: &Room, cfg: &AudioConfig) -> Result<PublishedAudio,
             audio
                 .set_recording_device_by_index(index)
                 .map_err(|e| format!("selecting the microphone: {e}"))?;
-            let _ = audio.set_echo_cancellation(cfg.echo_cancellation, false);
-            let _ = audio.set_auto_gain_control(cfg.auto_gain, false);
-            let _ = audio.set_noise_suppression(cfg.noise_suppression, false);
+            for (what, r) in [
+                (
+                    "echo cancellation",
+                    audio.set_echo_cancellation(cfg.echo_cancellation, false),
+                ),
+                (
+                    "gain control",
+                    audio.set_auto_gain_control(cfg.auto_gain, false),
+                ),
+                (
+                    "noise suppression",
+                    audio.set_noise_suppression(cfg.noise_suppression, false),
+                ),
+            ] {
+                if let Err(e) = r {
+                    log::warn!("microphone {what}: {e}");
+                }
+            }
             (audio.rtc_source(), None, Some(audio), name.clone())
         }
     };
@@ -1814,10 +1880,11 @@ async fn publish_audio(room: &Room, cfg: &AudioConfig) -> Result<PublishedAudio,
             task,
             platform,
             label: format!(
-                "Published audio from {what}, Opus up to {} kbps{}{}",
+                "Published audio from {what}, Opus up to {} kbps{}{}, WebRTC processing: {}",
                 cfg.bitrate_bps / 1000,
                 if cfg.dtx { ", DTX" } else { "" },
-                if cfg.red { ", RED" } else { "" }
+                if cfg.red { ", RED" } else { "" },
+                processing_label(cfg)
             ),
         }),
         Err(e) => {
@@ -1826,6 +1893,30 @@ async fn publish_audio(room: &Room, cfg: &AudioConfig) -> Result<PublishedAudio,
             }
             Err(e.to_string())
         }
+    }
+}
+
+/// Stops the tone thread.
+struct ToneTask(Arc<AtomicBool>);
+impl ToneTask {
+    fn abort(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+fn processing_label(cfg: &AudioConfig) -> String {
+    let on: Vec<&str> = [
+        (cfg.echo_cancellation, "AEC"),
+        (cfg.noise_suppression, "NS"),
+        (cfg.auto_gain, "AGC"),
+    ]
+    .into_iter()
+    .filter_map(|(on, n)| on.then_some(n))
+    .collect();
+    if on.is_empty() {
+        "off".into()
+    } else {
+        on.join(", ")
     }
 }
 
@@ -2053,7 +2144,13 @@ fn write_preview(slot: &SharedPreview, buf: &mut I420Buffer) {
     if w < 2 || h < 2 {
         return;
     }
-    let pw = PREVIEW_MAX_W.min(w) & !1;
+    let want = slot.lock().want_w;
+    let target = if want == 0 {
+        PREVIEW_MAX_W
+    } else {
+        want.max(160)
+    };
+    let pw = target.min(w) & !1;
     let ph = (((h as u64 * pw as u64) / w as u64) as u32).max(2) & !1;
     let small = buf.scale(pw as i32, ph as i32);
     let (sy, su, sv) = small.strides();
@@ -2131,5 +2228,49 @@ mod tests {
     fn phases() {
         assert!(Phase::Publishing.connected());
         assert!(!Phase::Disconnected.connected());
+    }
+}
+
+#[cfg(test)]
+mod apm_tests {
+    use super::*;
+
+    /// Root mean square of 2 s of tone after WebRTC's processing.
+    fn processed_rms(aec: bool, agc: bool, ns: bool) -> f64 {
+        let mut apm = livekit::webrtc::native::apm::AudioProcessingModule::new(aec, agc, false, ns);
+        let (mut sum, mut count) = (0.0, 0.0);
+        for n in 0..300u64 {
+            let mut d = tone_frame(n, 48_000);
+            apm.process_stream(&mut d, 48_000, 1).unwrap();
+            // Skip the first second while the modules adapt; only the beeps count.
+            if n >= 100 && (n % 100) < 60 {
+                for s in d {
+                    sum += (s as f64).powi(2);
+                    count += 1.0;
+                }
+            }
+        }
+        (sum / count).sqrt()
+    }
+
+    #[test]
+    fn processing_switches_change_the_tone() {
+        let raw = 8000.0 / 2f64.sqrt();
+        let off = processed_rms(false, false, false);
+        let ns = processed_rms(false, false, true);
+        let agc = processed_rms(false, true, false);
+        println!("rms raw {raw:.0} off {off:.0} ns {ns:.0} agc {agc:.0}");
+        assert!(
+            (off - raw).abs() / raw < 0.05,
+            "all off leaves the tone alone"
+        );
+        assert!(
+            (ns - off).abs() / off > 0.03,
+            "noise suppression changes the tone"
+        );
+        assert!(
+            (agc - off).abs() / off > 0.05,
+            "gain control changes the tone"
+        );
     }
 }
