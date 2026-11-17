@@ -87,6 +87,9 @@ ensure_platform_deps() {
     libX11-devel libXext-devel libXrandr-devel libXi-devel libXcursor-devel libXfixes-devel libXdamage-devel libXcomposite-devel libXtst-devel
     libxkbcommon-devel wayland-devel mesa-libGL-devel mesa-libEGL-devel mesa-libgbm-devel libdrm-devel libva-devel
     libv4l-devel glib2-devel alsa-lib-devel pulseaudio-libs-devel openssl-devel dbus-devel)
+  if command -v nvidia-smi >/dev/null 2>&1 && [[ ! -f "${CUDA_HOME:-/usr/local/cuda}/include/cuda.h" ]]; then
+    warn "NVIDIA GPU found but no CUDA toolkit: the build will have no NVENC/NVDEC. Install the CUDA toolkit (or set CUDA_HOME) before building to use them."
+  fi
   if command -v apt-get >/dev/null 2>&1; then
     local missing=()
     for p in "${apt_pkgs[@]}"; do dpkg -s "$p" >/dev/null 2>&1 || missing+=("$p"); done

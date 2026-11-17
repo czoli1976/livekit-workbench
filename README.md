@@ -93,6 +93,26 @@ Headless mode publishes and receives without a window, prints one line of stats 
 - **Bitrate ramps up.** WebRTC starts a camera track at no more than 1 Mbps and raises its estimate over about a minute. Publishing as *Screen share* starts near the cap.
 - **Disconnect returns at once.** On machines with network security software, closing WebRTC's sockets can take several seconds; the app finishes that in the background.
 
+## Hardware video per platform
+
+What the app offers comes from the SDK at start-up (`livekit-workbench --caps` prints it), so it adapts to each machine. What the LiveKit Rust SDK (0.11.0) can use:
+
+| | Hardware encode | Hardware decode | Software encode | Software decode |
+|---|---|---|---|---|
+| macOS | VideoToolbox: H.264, H.265 | VideoToolbox: H.264, H.265 | VP8, VP9, AV1, H.264 (OpenH264) | VP8, VP9, AV1 |
+| Linux, NVIDIA GPU | NVENC: H.264, H.265, AV1 (AV1 on GPUs that have it) | NVDEC: H.264, H.265 | same | VP8, VP9, AV1 |
+| Linux, Intel/AMD (x86) | VAAPI: H.264 | none | same | VP8, VP9, AV1 |
+| Linux, NVIDIA Jetson | Jetson: H.264, H.265, AV1 | none | same | VP8, VP9, AV1 |
+| Windows | none in this SDK build | none | VP8, VP9, AV1, H.264 (OpenH264) | VP8, VP9, AV1 |
+
+Things that follow from this:
+
+- **Linux hardware support is decided when you build.** VAAPI is compiled in only if `libva-dev` is installed (the build script installs it), NVENC/NVDEC only if the CUDA toolkit is found at `/usr/local/cuda` or `$CUDA_HOME`, and Jetson only if the Jetson Multimedia API is installed. Each is then switched on at run time if the driver and GPU are there. Install the CUDA toolkit before building to get NVENC.
+- **Windows has no hardware encoding in this SDK**, and **H.265 cannot be published on Windows** or on Linux without NVENC or Jetson: there is no software H.265 encoder.
+- **H.264 and H.265 need a hardware decoder to be received by the app** on Windows and Linux: the SDK's desktop builds have no software H.264 or H.265 decoder. Without one, the app publishes fine but its own far-end preview stays empty; it says so under the codec, and a browser viewer receives the stream.
+
+These are read from the SDK's source and checked on macOS; Windows and Linux are covered by CI builds, not yet by hands-on runs on those machines.
+
 ## Building by hand
 
 ```bash

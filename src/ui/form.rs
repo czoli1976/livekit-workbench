@@ -418,6 +418,24 @@ impl App {
                 .color(widgets::weak(ui)),
             );
         }
+        // Desktop SDK builds decode H.264 and H.265 only through a platform
+        // decoder (VideoToolbox, NVDEC); without one the app's own subscriber
+        // cannot receive that codec, though browsers can.
+        if !self
+            .caps
+            .get(self.form.codec)
+            .map(|c| c.decode)
+            .unwrap_or(true)
+        {
+            ui.label(
+                RichText::new(format!(
+                    "This machine can encode {} but the SDK cannot decode it here, so the far-end preview stays empty. Open a browser viewer to receive it.",
+                    codec_name(self.form.codec)
+                ))
+                .small()
+                .color(widgets::amber(ui)),
+            );
+        }
 
         ui.add_space(4.0);
         ui.horizontal(|ui| {

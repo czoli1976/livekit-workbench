@@ -280,7 +280,8 @@ pub fn outbound(stats: &[RtcStats]) -> Vec<RawOut> {
             height: o.outbound.frame_height,
             target_bps: o.outbound.target_bitrate,
             encoder: o.outbound.encoder_implementation.clone(),
-            hardware: o.outbound.power_efficient_encoder,
+            hardware: o.outbound.power_efficient_encoder
+                || is_platform_codec(&o.outbound.encoder_implementation),
             limit: format!("{:?}", o.outbound.quality_limitation_reason),
             limit_durations: (
                 d.get("bandwidth").copied().unwrap_or(0.0),
@@ -392,6 +393,9 @@ pub fn is_platform_codec(name: &str) -> bool {
         "MediaCodec",
         "NVDEC",
         "NVENC",
+        // Implementation names of the SDK's Linux encoders and decoders.
+        "NVIDIA",
+        "Jetson",
         "VAAPI",
         "MediaFoundation",
         "D3D11",
@@ -417,6 +421,17 @@ pub fn rate_mbps(now: u64, before: u64, dt: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn platform_codec_names() {
+        assert!(is_platform_codec("NVIDIA H264 Decoder"));
+        assert!(is_platform_codec("VAAPI H264 Encoder"));
+        assert!(is_platform_codec(
+            "SimulcastEncoderAdapter (VideoToolbox, VideoToolbox, VideoToolbox)"
+        ));
+        assert!(!is_platform_codec("libvpx"));
+        assert!(!is_platform_codec("OpenH264"));
+    }
 
     #[test]
     fn candidate_labels() {
