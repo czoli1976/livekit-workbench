@@ -866,8 +866,24 @@ impl Engine {
         let (out_stats, transport) = match &conn.published {
             Some(p) => match p.track.get_stats().await {
                 Ok(s) => (
-                    stats::outbound(&s),
-                    Some((stats::transport(&s), stats::has_flexfec(&s))),
+                    {
+                        if std::env::var_os("WB_CODECS").is_some() {
+                            let mut m: Vec<String> = s
+                                .iter()
+                                .filter_map(|x| match x {
+                                    livekit::webrtc::stats::RtcStats::Codec(c) => {
+                                        Some(c.codec.mime_type.clone())
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            m.sort();
+                            m.dedup();
+                            println!("      publisher codec stats: {m:?}");
+                        }
+                        stats::outbound(&s)
+                    },
+                    Some((stats::transport(&s), stats::fec_codecs(&s))),
                 ),
                 Err(_) => (Vec::new(), None),
             },
@@ -1045,7 +1061,8 @@ impl Engine {
                 .unwrap_or_default();
             if let Some((t, fec)) = transport {
                 snap.transport = t;
-                snap.fec_negotiated = fec;
+                snap.fec_negotiated = !fec.is_empty();
+                snap.fec = fec;
             }
 
             // Receive side: this app's subscriber, then browser viewers.

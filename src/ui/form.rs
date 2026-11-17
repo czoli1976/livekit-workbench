@@ -578,7 +578,8 @@ impl App {
         ui.separator();
         // ---- Resilience
         section(ui, "Resilience");
-        let fec = self.session.shared.lock().snapshot.fec_negotiated;
+        let fec_list = self.session.shared.lock().snapshot.fec.clone();
+        let fec = !fec_list.is_empty();
         egui::Grid::new("res-grid")
             .num_columns(2)
             .spacing([8.0, 4.0])
@@ -587,15 +588,16 @@ impl App {
                 let fec_text = if !phase.connected() {
                     RichText::new("Shown once publishing")
                 } else if fec {
-                    RichText::new("Negotiated").color(widgets::green(ui))
+                    RichText::new(format!("{} negotiated", fec_list.join(", ")))
+                        .color(widgets::green(ui))
                 } else {
                     RichText::new("Not negotiated")
                 };
-                widgets::kv(ui, "Video FEC (FlexFEC-03)", fec_text);
+                widgets::kv(ui, "Video FEC", fec_text);
             });
         ui.label(
             RichText::new(
-                "The SDK has no client switch for video FEC. The server enables it for publisher to SFU with rtc.flexfec.upstream_enabled; the Local dev profile can turn that on.",
+                "Not available from this app's publisher. LiveKit 1.13.11 can accept FlexFEC-03 from publishers (rtc.flexfec.upstream_enabled), but WebRTC only offers it with the WebRTC-FlexFEC-03 field trials, and the Rust SDK compiles in a fixed set without them. WebRTC also offers ULPFEC with RED, and the LiveKit server's answer leaves them out. Recovery here is NACK and RTX.",
             )
             .small()
             .color(widgets::weak(ui)),

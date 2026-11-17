@@ -417,8 +417,9 @@ impl App {
                         ui.label("");
                         ui.checkbox(
                             &mut d.local.flexfec_upstream,
-                            "Enable FlexFEC upstream (restarts the server)",
-                        );
+                            "Accept FlexFEC upstream (restarts the server)",
+                        )
+                        .on_hover_text("Sets rtc.flexfec.upstream_enabled (LiveKit 1.13.11 and later). Only publishers that offer FlexFEC-03 use it: not this app's publisher (the Rust SDK lacks the WebRTC field trials), but for example Chrome started with --force-fieldtrials=WebRTC-FlexFEC-03/Enabled/WebRTC-FlexFEC-03-Advertised/Enabled/.");
                         ui.end_row();
                         ui.label("");
                         ui.checkbox(

@@ -86,6 +86,8 @@ pub struct App {
     settings_open: bool,
     test_pending_done: bool,
     codec_versions: crate::codec_versions::CodecVersions,
+    /// Newer livekit-server check and update, shared with background work.
+    server_update: Arc<Mutex<crate::server_update::UpdateState>>,
     /// Browser viewers ask the SFU for a layer that fits their video element.
     browser_adaptive: bool,
 }
@@ -153,6 +155,7 @@ impl App {
             settings_open: true,
             test_pending_done: false,
             codec_versions: crate::codec_versions::read(),
+            server_update: Default::default(),
             autoconnect_pending: std::env::var_os("WB_AUTOCONNECT").is_some(),
             rt,
         };
@@ -174,6 +177,7 @@ impl App {
         }
         app.start_server_poller();
         app.activate_profile_server(true);
+        app.check_server_update();
         app.start_viewer_server();
         app.refresh_cameras();
         app
@@ -650,6 +654,7 @@ impl App {
                     self.show_stats = true;
                     self.stats_ui.tab = stats_window::StatsTab::Server;
                 }
+                self.server_update_ui(ui);
                 ui.separator();
             }
             if let Some((text, at)) = &self.notice {
@@ -729,6 +734,122 @@ fn main_is_fullscreen(ctx: &egui::Context) -> bool {
     ctx.input_for(egui::ViewportId::ROOT, |i| {
         i.viewport().fullscreen.unwrap_or(false)
     })
+}
+
+impl App {
+    /// Ask GitHub, off the UI thread, whether a newer livekit-server exists.
+    fn check_server_update(&mut self) {
+        use crate::server_update::UpdateState;
+        let profile = self.current_profile();
+        if !profile.is_local() {
+            return;
+        }
+        let Some(binary) = crate::local_server::find_binary(&profile.local.binary_path) else {
+            return;
+        };
+        let state = self.server_update.clone();
+        *state.lock() = UpdateState::Checking;
+        std::thread::spawn(move || {
+            let result = crate::server_update::check(&binary);
+            *state.lock() = match result {
+                Ok(s) => s,
+                Err(e) => {
+                    // Offline or rate-limited: say nothing in the UI.
+                    log::info!("server update check: {e:#}");
+                    UpdateState::Idle
+                }
+            };
+        });
+    }
+
+    /// Stop the server, update it, start it again.
+    fn run_server_update(&mut self, info: crate::server_update::UpdateInfo) {
+        use crate::server_update::UpdateState;
+        if self.session.phase() != Phase::Disconnected {
+            self.session.disconnect();
+        }
+        let state = self.server_update.clone();
+        let server = self.server.clone();
+        let opts = self.current_profile().local.clone();
+        *state.lock() = UpdateState::Updating("Stopping the server…".into());
+        self.rt.spawn(async move {
+            server.stop().await;
+            let progress_state = state.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                let progress = move |s: String| *progress_state.lock() = UpdateState::Updating(s);
+                crate::server_update::update(&info, &progress)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .and_then(|r| r);
+            *state.lock() = match result {
+                Ok(v) => UpdateState::Updated(v),
+                Err(e) => UpdateState::Failed(format!("{e:#}")),
+            };
+            if let Err(e) = server.start(opts).await {
+                log::warn!("local server after update: {e:#}");
+            }
+        });
+    }
+
+    fn server_update_ui(&mut self, ui: &mut egui::Ui) {
+        use crate::server_update::{InstallKind, UpdateState};
+        let state = self.server_update.lock().clone();
+        match state {
+            UpdateState::Available(info) => {
+                ui.colored_label(
+                    theme::AMBER_TEXT,
+                    format!(
+                        "livekit-server {} available (you have {})",
+                        info.latest, info.installed
+                    ),
+                );
+                match info.kind.clone() {
+                    InstallKind::Other => {
+                        ui.label(
+                            RichText::new(
+                                "installed outside the app; update it the way it was installed",
+                            )
+                            .small()
+                            .color(theme::MUTED),
+                        )
+                        .on_hover_text(info.binary.display().to_string());
+                    }
+                    kind => {
+                        let how = if kind == InstallKind::Homebrew {
+                            "Runs brew upgrade livekit, then restarts the server. Disconnects first."
+                        } else {
+                            "Downloads the release from GitHub, checks its SHA-256, replaces the server and restarts it. Disconnects first."
+                        };
+                        if ui
+                            .add(widgets::accent_button("Update"))
+                            .on_hover_text(how)
+                            .clicked()
+                        {
+                            self.run_server_update(info);
+                        }
+                    }
+                }
+            }
+            UpdateState::Updating(step) => {
+                ui.add(egui::Spinner::new().size(12.0));
+                ui.colored_label(theme::AMBER_TEXT, step);
+            }
+            UpdateState::Updated(v) => {
+                ui.colored_label(theme::GREEN_TEXT, format!("Updated to {v}"));
+                if ui.small_button("OK").clicked() {
+                    *self.server_update.lock() = UpdateState::UpToDate(v);
+                }
+            }
+            UpdateState::Failed(e) => {
+                ui.colored_label(theme::RED, format!("Update failed: {e}"));
+                if ui.small_button("Dismiss").clicked() {
+                    *self.server_update.lock() = UpdateState::Idle;
+                }
+            }
+            UpdateState::Idle | UpdateState::Checking | UpdateState::UpToDate(_) => {}
+        }
+    }
 }
 
 /// The resting state a transitional phase belongs to, for the phase indicator.

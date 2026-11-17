@@ -615,10 +615,10 @@ impl App {
                     kv(
                         ui,
                         "Video FEC",
-                        if snap.fec_negotiated {
-                            "FlexFEC negotiated"
+                        if snap.fec.is_empty() {
+                            "none negotiated (NACK and RTX only)".to_string()
                         } else {
-                            "not negotiated"
+                            format!("{} negotiated", snap.fec.join(", "))
                         },
                     );
                 });

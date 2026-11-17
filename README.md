@@ -77,6 +77,13 @@ The synthetic *detailed motion* source changes every pixel every frame, so it ne
 
 Add a profile under **Edit profiles** with your project URL, API key and secret, then press **Test connection**. Cloud usage is billed: a 50 Mbps test with two subscribers moves about 45 GB an hour.
 
+### Updating the local server
+
+At start-up the app compares the installed `livekit-server` with LiveKit's latest release on GitHub. If it is newer, the status line offers **Update**: the app disconnects, stops the server, updates it and starts it again.
+- Installed by the build script on Linux or Windows (in the app's data folder): it downloads the release, checks its SHA-256 against the release's checksums and replaces the binary.
+- Installed with Homebrew (macOS): it runs `brew upgrade livekit`. Homebrew can lag GitHub by a few days; the app says so if it does.
+- Installed anywhere else: it tells you where it is and leaves the update to you.
+
 ### Command line
 
 ```bash
@@ -94,7 +101,7 @@ Headless mode publishes and receives without a window, prints one line of stats 
 - **SVC** is offered for VP9 and AV1 with a software encoder only. The SDK applies a scalability mode only for those codecs, and its hardware AV1 encoders advertise L1T1 only.
 - **On macOS the SDK uses VideoToolbox for H.264 and H.265 only**, to encode and to decode. VP8 and VP9 use libvpx, and AV1 uses libaom to encode and dav1d to decode, even on Macs whose hardware can decode AV1 (M3 and later) or VP9. Asking for a hardware encoder with those codecs still gets the software one, so the app shows them as software only. Browser viewers such as Safari may use the hardware decoders; their rows in Stats show what the browser reports. There is no software H.265 encoder in the SDK, so H.265 always uses VideoToolbox.
 - **Content hint (W3C `contentHint`).** The Rust SDK has no setter for it, so the app sets the video source's screencast flag, which is exactly what WebRTC turns `contentHint` "detail" and "text" into ("motion" clears it); nothing else in WebRTC reads the hint once a degradation preference is set, and the SDK always sets one. With Detail / text, WebRTC turns *Balanced* into *keep resolution* (it drops frames instead of lowering the size), raises a low bitrate cap to 1.2 Mbps and labels frames as screen content. LiveKit's WebRTC also caps VideoToolbox's QP at 39 and uses H.264 Baseline at an automatic level, and OpenH264 switches to its screen-content mode. NVENC, VAAPI and Jetson do nothing extra with it. It does not change which encoder is chosen.
-- **Video FEC** has no client switch in the SDK. The server enables FlexFEC for publisher to SFU (`rtc.flexfec.upstream_enabled`); the Local dev profile has an option for it.
+- **Video FEC is not used by this app's publisher; recovery is NACK and RTX.** LiveKit 1.13.11 can accept FlexFEC-03 from publishers (`rtc.flexfec.upstream_enabled`, the Local dev profile's *Accept FlexFEC upstream*), but WebRTC only offers FlexFEC with its `WebRTC-FlexFEC-03` field trials, and the Rust SDK compiles in a fixed set without them. WebRTC also offers ULPFEC with RED, and the LiveKit server's answer leaves them out. A Chrome publisher started with `--force-fieldtrials=WebRTC-FlexFEC-03/Enabled/WebRTC-FlexFEC-03-Advertised/Enabled/` can use the server's FlexFEC. Stats show which FEC, if any, was negotiated.
 - **Bitrate ramps up.** WebRTC starts a camera track at no more than 1 Mbps and raises its estimate over about a minute. Publishing as *Screen share* starts near the cap.
 - **Disconnect returns at once.** On machines with network security software, closing WebRTC's sockets can take several seconds; the app finishes that in the background.
 

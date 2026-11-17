@@ -10,6 +10,7 @@ mod headless;
 mod health;
 mod local_server;
 mod profiles;
+mod server_update;
 mod session;
 mod stats;
 mod throttle;

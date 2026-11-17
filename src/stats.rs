@@ -140,6 +140,8 @@ pub struct Snapshot {
     pub server_quality_pub: Option<String>,
     pub server_quality_sub: Option<String>,
     pub fec_negotiated: bool,
+    /// Which FEC is in use on the publisher connection: "FlexFEC", "ULPFEC", "RED".
+    pub fec: Vec<String>,
     /// Increments on every sample, so viewers can tell a new one arrived.
     pub seq: u64,
     pub history: History,
@@ -253,8 +255,30 @@ pub fn codec_label(stats: &[RtcStats], codec_id: &str) -> String {
     String::new()
 }
 
-pub fn has_flexfec(stats: &[RtcStats]) -> bool {
-    stats.iter().any(|s| matches!(s, RtcStats::Codec(c) if c.codec.mime_type.to_ascii_lowercase().contains("flexfec")))
+/// Forward error correction in use on this connection, from its codec stats:
+/// "FlexFEC", "ULPFEC", "RED".
+pub fn fec_codecs(stats: &[RtcStats]) -> Vec<String> {
+    let mut out: Vec<String> = stats
+        .iter()
+        .filter_map(|s| match s {
+            RtcStats::Codec(c) => {
+                let m = c.codec.mime_type.to_ascii_lowercase();
+                if m.contains("flexfec") {
+                    Some("FlexFEC".to_string())
+                } else if m.contains("ulpfec") {
+                    Some("ULPFEC".to_string())
+                } else if m.ends_with("/red") && m.starts_with("video") {
+                    Some("RED".to_string())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 pub fn outbound(stats: &[RtcStats]) -> Vec<RawOut> {
