@@ -10,6 +10,9 @@ reviews:
   auto_review:
     enabled: true
     drafts: false
+    # Every target branch, not only the default one.
+    base_branches:
+      - ".*"
   path_filters:
     - "!target/**"
     - "!dist/**"
