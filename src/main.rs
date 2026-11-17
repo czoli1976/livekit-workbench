@@ -29,6 +29,9 @@ fn main() -> eframe::Result {
             println!("Codec libraries: {}", codec_versions::read().summary());
             return Ok(());
         }
+        Some("--camera-test") => {
+            std::process::exit(capture::camera_test());
+        }
         Some("--caps") => {
             capabilities::print_probe();
             return Ok(());

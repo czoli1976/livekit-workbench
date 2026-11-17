@@ -79,6 +79,7 @@ pub fn list_cameras() -> Result<Vec<CameraDesc>> {
 
 /// Formats the camera advertises, largest first, one entry per size and rate.
 pub fn camera_formats(index: u32) -> Result<Vec<CameraFormat>> {
+    camera_access()?;
     use nokhwa::pixel_format::RgbAFormat;
     use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
     let mut cam = nokhwa::Camera::new(
@@ -151,6 +152,41 @@ fn run_synthetic(
     }
 }
 
+enum CamMsg {
+    Info(CaptureInfo),
+    Frame(I420Buffer),
+    Failed(String),
+}
+
+/// No first frame within this long after the stream opened: give up.
+const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(8);
+/// Frames stopped arriving for this long: give up.
+const FRAME_GAP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Is the app allowed to use the camera? On macOS the answer belongs to the
+/// app bundle, or to the terminal the binary was started from.
+pub fn camera_access() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    if !nokhwa::nokhwa_check() && std::env::var_os("WB_SKIP_CAMERA_CHECK").is_none() {
+        let bundled = std::env::current_exe()
+            .map(|p| p.to_string_lossy().contains(".app/Contents/MacOS"))
+            .unwrap_or(false);
+        let who = if bundled {
+            "Workbench for LiveKit"
+        } else {
+            "the terminal or app that started Workbench (or start it from dist/Workbench for LiveKit.app)"
+        };
+        return Err(anyhow!(
+            "camera access is not allowed. Allow it in System Settings › Privacy & Security › Camera for {who}, then restart the app"
+        ));
+    }
+    Ok(())
+}
+
+/// Capture from a camera. The camera runs on its own thread: reading a frame
+/// can block indefinitely (no permission, a device that never starts), so this
+/// side waits with timeouts, checks `stop` every 200 ms, and never waits for
+/// that thread to finish.
 fn run_camera(
     index: u32,
     width: u32,
@@ -159,6 +195,71 @@ fn run_camera(
     stop: &AtomicBool,
     on_info: impl FnOnce(CaptureInfo),
     mut on_frame: impl FnMut(I420Buffer),
+) -> Result<()> {
+    use std::sync::mpsc::{sync_channel, RecvTimeoutError};
+    use std::sync::Arc;
+    camera_access()?;
+    let inner_stop = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = sync_channel::<CamMsg>(2);
+    {
+        let inner_stop = inner_stop.clone();
+        std::thread::Builder::new()
+            .name("camera".into())
+            .spawn(move || {
+                if let Err(e) = camera_loop(index, width, height, fps, &inner_stop, &tx) {
+                    let _ = tx.send(CamMsg::Failed(format!("{e:#}")));
+                }
+            })
+            .map_err(|e| anyhow!("starting the camera thread: {e}"))?;
+    }
+    let mut on_info = Some(on_info);
+    let mut opened = Instant::now();
+    let mut last_frame: Option<Instant> = None;
+    let result = loop {
+        if stop.load(Ordering::SeqCst) {
+            break Ok(());
+        }
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(CamMsg::Info(i)) => {
+                opened = Instant::now();
+                if let Some(f) = on_info.take() {
+                    f(i);
+                }
+            }
+            Ok(CamMsg::Frame(buf)) => {
+                last_frame = Some(Instant::now());
+                on_frame(buf);
+            }
+            Ok(CamMsg::Failed(e)) => break Err(anyhow!(e)),
+            Err(RecvTimeoutError::Timeout) => match last_frame {
+                None if opened.elapsed() > FIRST_FRAME_TIMEOUT => {
+                    break Err(anyhow!(
+                        "the camera sent no frames within {} s. It may be in use by another app, or camera access may be blocked",
+                        FIRST_FRAME_TIMEOUT.as_secs()
+                    ))
+                }
+                Some(t) if t.elapsed() > FRAME_GAP_TIMEOUT => {
+                    break Err(anyhow!("the camera stopped sending frames"))
+                }
+                _ => {}
+            },
+            Err(RecvTimeoutError::Disconnected) => break Ok(()),
+        }
+    };
+    // Tell the camera thread to stop; it may be stuck inside the OS, so do not
+    // wait for it. It ends, and releases the camera, when the OS returns.
+    inner_stop.store(true, Ordering::SeqCst);
+    result
+}
+
+/// The camera itself, on its own thread.
+fn camera_loop(
+    index: u32,
+    width: u32,
+    height: u32,
+    fps: u32,
+    stop: &AtomicBool,
+    tx: &std::sync::mpsc::SyncSender<CamMsg>,
 ) -> Result<()> {
     use nokhwa::pixel_format::RgbAFormat;
     use nokhwa::utils::{
@@ -203,11 +304,11 @@ fn run_camera(
     cam.open_stream()
         .map_err(|e| anyhow!("starting the camera: {e}"))?;
     let fmt = cam.camera_format();
-    on_info(CaptureInfo {
+    let _ = tx.send(CamMsg::Info(CaptureInfo {
         width: fmt.width(),
         height: fmt.height(),
         note: format!("camera · {} · {} fps", fmt.format(), fmt.frame_rate()),
-    });
+    }));
 
     while !stop.load(Ordering::SeqCst) {
         let frame = cam
@@ -243,7 +344,11 @@ fn run_camera(
                 buf
             }
         };
-        on_frame(buf);
+        // A full queue means the publisher is behind: drop this frame.
+        match tx.try_send(CamMsg::Frame(buf)) {
+            Ok(()) | Err(std::sync::mpsc::TrySendError::Full(_)) => {}
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => break,
+        }
     }
     let _ = cam.stop_stream();
     Ok(())
@@ -362,6 +467,77 @@ impl Synthetic {
         }
         self.n += 1;
         buf
+    }
+}
+
+/// `--camera-test`: open the first camera and time each step, with a watchdog
+/// so a step that never returns is reported instead of hanging.
+pub fn camera_test() -> i32 {
+    use std::sync::mpsc;
+    let (tx, rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let t0 = Instant::now();
+        let say = |s: String| {
+            let _ = tx.send(format!("{:>6} ms  {s}", t0.elapsed().as_millis()));
+        };
+        #[cfg(target_os = "macos")]
+        say(format!(
+            "access already granted: {}",
+            nokhwa::nokhwa_check()
+        ));
+        let cams = match list_cameras() {
+            Ok(c) => c,
+            Err(e) => return say(format!("list failed: {e:#}")),
+        };
+        say(format!(
+            "cameras: {:?}",
+            cams.iter().map(|c| (c.index, &c.name)).collect::<Vec<_>>()
+        ));
+        let Some(cam) = cams.first() else {
+            return say("no camera".into());
+        };
+        match camera_formats(cam.index) {
+            Ok(f) => say(format!("{} formats, first {:?}", f.len(), f.first())),
+            Err(e) => return say(format!("formats failed: {e:#}")),
+        }
+        let stop = AtomicBool::new(false);
+        let mut n = 0u32;
+        let started = Instant::now();
+        let r = run_camera(
+            cam.index,
+            1280,
+            720,
+            30,
+            &stop,
+            |i| say(format!("stream open: {}x{} {}", i.width, i.height, i.note)),
+            |_| {
+                n += 1;
+                if n == 1 || n == 30 {
+                    say(format!("frame {n}"));
+                }
+                if started.elapsed() > Duration::from_secs(3) {
+                    stop.store(true, Ordering::SeqCst);
+                }
+            },
+        );
+        say(format!("capture ended: {r:?} after {n} frames"));
+        say("done".into());
+    });
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(line) => {
+                println!("{line}");
+                if line.ends_with("done") || line.contains("failed") || line.ends_with("no camera")
+                {
+                    return 0;
+                }
+            }
+            Err(_) => {
+                println!("HUNG: no progress for 20 s (the last step above never returned)");
+                return 1;
+            }
+        }
     }
 }
 

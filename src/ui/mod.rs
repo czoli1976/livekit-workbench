@@ -27,6 +27,9 @@ use form::PublishForm;
 use pipeline::{ChartMetric, PreviewLayout, PreviewPane, SubAsk};
 use stats_window::StatsUi;
 
+/// Camera formats listed in the background: (camera index, formats or error).
+type FormatsResult = (u32, Result<Vec<CameraFormat>, String>);
+
 pub struct App {
     rt: tokio::runtime::Runtime,
     session: Session,
@@ -47,6 +50,7 @@ pub struct App {
     cameras: Vec<CameraDesc>,
     camera_formats: Vec<CameraFormat>,
     formats_for: Option<u32>,
+    formats_pending: Arc<Mutex<Option<FormatsResult>>>,
     camera_error: Option<String>,
 
     previews: bool,
@@ -129,6 +133,7 @@ impl App {
             cameras: Vec::new(),
             camera_formats: Vec::new(),
             formats_for: None,
+            formats_pending: Default::default(),
             camera_error: None,
             previews: true,
             chart: ChartMetric::Bitrate,
@@ -222,15 +227,42 @@ impl App {
         }
     }
 
+    /// Ask the camera for its formats off the UI thread: opening a camera can
+    /// take seconds, or block when access is not allowed.
     fn load_formats(&mut self, index: u32) {
-        if self.formats_for == Some(index) {
+        if self.formats_for != Some(index) {
+            self.formats_for = Some(index);
+            self.camera_formats.clear();
+            let slot = self.formats_pending.clone();
+            *slot.lock() = None;
+            std::thread::spawn(move || {
+                let r = capture::camera_formats(index).map_err(|e| format!("{e:#}"));
+                *slot.lock() = Some((index, r));
+            });
+        }
+        let ready = self.formats_pending.lock().take();
+        let Some((for_index, result)) = ready else {
+            return;
+        };
+        if Some(for_index) != self.formats_for {
             return;
         }
-        self.formats_for = Some(index);
-        self.camera_formats.clear();
-        match capture::camera_formats(index) {
-            Ok(f) => {
+        match result {
+            Ok(mut f) => {
                 self.camera_error = None;
+                if f.is_empty() {
+                    // Some cameras list no formats through this API: offer the
+                    // usual sizes and let the camera pick the closest.
+                    f = form::SIZES
+                        .iter()
+                        .filter(|s| s.2 <= 1080)
+                        .map(|&(_, w, h)| CameraFormat {
+                            width: w,
+                            height: h,
+                            fps: 30,
+                        })
+                        .collect();
+                }
                 let current = (self.form.capture, self.form.fps);
                 if !f.iter().any(|x| ((x.width, x.height), x.fps) == current) {
                     // Prefer 1080p30 or the closest below it, else the first format.
@@ -246,7 +278,7 @@ impl App {
                 }
                 self.camera_formats = f;
             }
-            Err(e) => self.camera_error = Some(format!("{e:#}")),
+            Err(e) => self.camera_error = Some(e),
         }
     }
 

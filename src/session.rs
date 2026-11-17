@@ -575,7 +575,12 @@ impl Engine {
         };
         p.stop.store(true, Ordering::SeqCst);
         if let Some(t) = p.thread.take() {
-            let _ = tokio::task::spawn_blocking(move || t.join()).await;
+            // Capture threads check their stop flag often; never wait forever.
+            let _ = tokio::time::timeout(
+                Duration::from_secs(3),
+                tokio::task::spawn_blocking(move || t.join()),
+            )
+            .await;
         }
         let dims = p.cfg.publish_dims();
         let counters = CaptureCounters::default();
@@ -619,7 +624,12 @@ impl Engine {
         (self.repaint)();
         p.stop.store(true, Ordering::SeqCst);
         if let Some(t) = p.thread.take() {
-            let _ = tokio::task::spawn_blocking(move || t.join()).await;
+            // Capture threads check their stop flag often; never wait forever.
+            let _ = tokio::time::timeout(
+                Duration::from_secs(3),
+                tokio::task::spawn_blocking(move || t.join()),
+            )
+            .await;
         }
         let _ = conn
             .pub_room
@@ -646,7 +656,12 @@ impl Engine {
         if let Some(mut p) = conn.published.take() {
             p.stop.store(true, Ordering::SeqCst);
             if let Some(t) = p.thread.take() {
-                let _ = tokio::task::spawn_blocking(move || t.join()).await;
+                // Capture threads check their stop flag often; never wait forever.
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(3),
+                    tokio::task::spawn_blocking(move || t.join()),
+                )
+                .await;
             }
             published_sid = Some(p.sid.clone());
         }
