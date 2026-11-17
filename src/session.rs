@@ -642,6 +642,8 @@ impl Engine {
         relay: Option<&crate::impair::Relay>,
         timeout: Duration,
     ) -> Result<Connection> {
+        // One deadline for the whole attempt: both rooms share the time budget.
+        let deadline = tokio::time::Instant::now() + timeout;
         let suffix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() % 100_000)
@@ -656,14 +658,14 @@ impl Engine {
         sub_opts.encryption = encryption(&cfg);
         let sub_token = token(&cfg, &format!("workbench-sub-{suffix}"), false)?;
         let (sub_room, sub_events) =
-            tokio::time::timeout(timeout, Room::connect(&cfg.url, &sub_token, sub_opts))
+            tokio::time::timeout_at(deadline, Room::connect(&cfg.url, &sub_token, sub_opts))
                 .await
                 .map_err(|_| anyhow!("Timed out connecting to {}", cfg.url))?
                 .with_context(|| format!("Could not connect to {}", cfg.url))?;
 
         let pub_token = token(&cfg, &format!("workbench-pub-{suffix}"), true)?;
-        let pub_result = tokio::time::timeout(
-            timeout,
+        let pub_result = tokio::time::timeout_at(
+            deadline,
             Room::connect(&cfg.url, &pub_token, {
                 let mut o = RoomOptions::default();
                 o.encryption = encryption(&cfg);
