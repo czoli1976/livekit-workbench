@@ -36,15 +36,20 @@ use crate::session::{
 };
 
 /// "detail", "pattern", "screen" or "camera" (the first camera).
-fn parse_source(s: &str) -> SourceKind {
+fn parse_source(s: &str) -> Result<SourceKind, String> {
     match s {
-        "pattern" => SourceKind::Pattern,
-        "screen" => SourceKind::Screen,
+        "pattern" => Ok(SourceKind::Pattern),
+        "detail" => Ok(SourceKind::Detail),
+        "screen" => Ok(SourceKind::Screen),
+        // An explicit camera request must test a camera, never fall back.
         "camera" => crate::capture::list_cameras()
-            .ok()
-            .and_then(|c| c.first().map(|c| SourceKind::Camera(c.index)))
-            .unwrap_or(SourceKind::Detail),
-        _ => SourceKind::Detail,
+            .map_err(|e| format!("--source camera: {e:#}"))?
+            .first()
+            .map(|c| SourceKind::Camera(c.index))
+            .ok_or_else(|| "--source camera: no camera found".to_string()),
+        other => Err(format!(
+            "unknown source \"{other}\": detail, pattern, camera or screen"
+        )),
     }
 }
 
@@ -312,9 +317,29 @@ pub fn run(args: &[String]) -> i32 {
         "simulcast" => Layering::Simulcast,
         m => Layering::Svc(m.to_string()),
     };
-    let source = opt(args, "--source")
-        .map(parse_source)
-        .unwrap_or(SourceKind::Detail);
+    let source = match opt(args, "--source").map(parse_source) {
+        None => SourceKind::Detail,
+        Some(Ok(s)) => s,
+        Some(Err(e)) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    // Check --switch up front, so a typo fails before connecting.
+    let switches: Vec<(String, SourceKind)> = match opt(args, "--switch")
+        .map(|l| {
+            l.split(',')
+                .map(|n| parse_source(n).map(|s| (n.to_string(), s)))
+                .collect::<Result<Vec<_>, String>>()
+        })
+        .transpose()
+    {
+        Ok(v) => v.unwrap_or_default(),
+        Err(e) => {
+            eprintln!("--switch: {e}");
+            return 2;
+        }
+    };
     let seconds: u64 = opt(args, "--seconds")
         .and_then(|v| v.parse().ok())
         .unwrap_or(10);
@@ -433,7 +458,10 @@ pub fn run(args: &[String]) -> i32 {
     for sec in 1..=seconds {
         std::thread::sleep(Duration::from_secs(1));
         let (rh, rfps) = line(&session, sec);
-        if rh > 0 && rfps > 0.0 {
+        // Frames must be captured too: with a failed input WebRTC keeps
+        // repeating the last frame, which would otherwise look received.
+        let captured = session.shared.lock().snapshot.capture.fps > 0.0;
+        if rh > 0 && rfps > 0.0 && captured {
             received = true;
         }
         if let Some(e) = session.shared.lock().error.clone() {
@@ -441,7 +469,16 @@ pub fn run(args: &[String]) -> i32 {
         }
     }
 
-    let mut ok = received;
+    let input_failed = session
+        .shared
+        .lock()
+        .error
+        .as_deref()
+        .is_some_and(|e| e.starts_with("Input stopped"));
+    if input_failed {
+        println!("input failed during the run");
+    }
+    let mut ok = received && !input_failed;
     if publish.audio.input != AudioInput::Off {
         let a = session.shared.lock().snapshot.audio.clone();
         let heard = a.receiving && a.recv_kbps > 0.0;
@@ -521,11 +558,12 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     // --switch screen,camera: switch the live input in turn, 8 s each.
-    if let Some(list) = opt(args, "--switch") {
-        for name in list.split(',') {
+    for (name, kind) in &switches {
+        {
             let mut next = publish.clone();
-            next.source = parse_source(name);
-            session.switch_source(next);
+            next.source = kind.clone();
+            session.switch_source(next.clone());
+            let mut captured = false;
             for sec in 1..=8 {
                 std::thread::sleep(Duration::from_secs(1));
                 let snap = session.shared.lock().snapshot.clone();
@@ -539,7 +577,18 @@ pub fn run(args: &[String]) -> i32 {
                     session.phase(),
                     err
                 );
+                captured |= sec >= 3 && snap.capture.fps > 0.0 && err.is_none();
             }
+            // Each switch must end up capturing the requested input.
+            let active = session
+                .shared
+                .lock()
+                .active_publish
+                .as_ref()
+                .map(|p| p.source.clone());
+            let switched = captured && active.as_ref() == Some(kind);
+            println!("switch {name}: {}", if switched { "ok" } else { "FAILED" });
+            ok &= switched;
         }
     }
 

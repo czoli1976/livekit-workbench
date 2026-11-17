@@ -314,6 +314,10 @@ impl App {
                         .color(super::theme::ACCENT_TEXT),
                 );
             }
+            // Camera formats are kept current even while Options is folded.
+            if let SourceKind::Camera(index) = self.form.source {
+                self.load_formats(index);
+            }
             if self.video_opts_open {
                 self.video_options(ui);
             }
@@ -336,8 +340,7 @@ impl App {
                 live_badge(ui);
             });
             match self.form.source.clone() {
-                SourceKind::Camera(index) => {
-                    self.load_formats(index);
+                SourceKind::Camera(_) => {
                     let label = format!("{}×{} · {} fps", self.form.capture.0, self.form.capture.1, self.form.fps);
                     egui::ComboBox::from_id_salt("cam-format").selected_text(label).width(190.0).show_ui(ui, |ui| {
                         for f in self.camera_formats.clone() {
@@ -805,9 +808,11 @@ impl App {
 
     /// The audio source: icon, input picker, level, summary, and options that fold out.
     fn audio_card(&mut self, ui: &mut egui::Ui) {
+        // Only while publishing: the last sample stays in the snapshot after.
         let level = {
             let sh = self.session.shared.lock();
-            (!sh.snapshot.audio.source.is_empty()).then_some(sh.snapshot.audio.send_level)
+            (sh.phase == Phase::Publishing && !sh.snapshot.audio.source.is_empty())
+                .then_some(sh.snapshot.audio.send_level)
         };
         widgets::source_frame().show(ui, |ui| {
             ui.set_width(ui.available_width());

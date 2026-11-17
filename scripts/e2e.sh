@@ -16,9 +16,10 @@ export RUST_LOG=off
 pass=0; fail=0
 run() {
   local name="$1"; shift
-  local out
+  local out status
   out=$("$B" --headless "$@" 2>&1)
-  if grep -q "RESULT: ok" <<<"$out"; then
+  status=$?
+  if [[ $status -eq 0 ]] && grep -q "RESULT: ok" <<<"$out"; then
     printf "PASS %s\n" "$name"; pass=$((pass + 1))
   else
     printf "FAIL %s\n" "$name"; fail=$((fail + 1))

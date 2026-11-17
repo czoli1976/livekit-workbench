@@ -129,11 +129,10 @@ fn ratio(a: f64, b: f64) -> f64 {
 }
 
 fn capture(i: &HealthInput) -> Verdict {
-    if i.seconds_since_capture_frame >= 2.0 {
-        return Verdict::new(Health::Failing, "No frames for 2 s");
-    }
-    let r = ratio(i.capture_fps, i.target_fps);
-    if i.screen {
+    // A screen sends nothing while it is unchanged; its capture loop reports
+    // a real stall itself after 5 s.
+    if i.screen && i.seconds_since_capture_frame < 5.0 {
+        let r = ratio(i.capture_fps, i.target_fps);
         return Verdict::new(
             Health::Good,
             format!(
@@ -142,6 +141,10 @@ fn capture(i: &HealthInput) -> Verdict {
             ),
         );
     }
+    if i.seconds_since_capture_frame >= 2.0 {
+        return Verdict::new(Health::Failing, "No frames for 2 s");
+    }
+    let r = ratio(i.capture_fps, i.target_fps);
     if r >= 0.95 {
         Verdict::new(Health::Good, "At target frame rate")
     } else if r >= 0.70 {
@@ -519,5 +522,28 @@ mod tests {
         assert_eq!(Health::Unknown.worst(Health::Good), Health::Good);
         assert_eq!(Health::Degraded.worst(Health::Failing), Health::Failing);
         assert_eq!(Health::Good.worst(Health::Degraded), Health::Degraded);
+    }
+}
+
+#[cfg(test)]
+mod screen_tests {
+    use super::*;
+
+    #[test]
+    fn unchanged_screen_is_not_failing() {
+        let i = HealthInput {
+            publishing: true,
+            screen: true,
+            target_fps: 30.0,
+            capture_fps: 0.0,
+            seconds_since_capture_frame: 3.0,
+            ..Default::default()
+        };
+        assert_eq!(capture(&i).health, Health::Good);
+        let stalled = HealthInput {
+            seconds_since_capture_frame: 6.0,
+            ..i
+        };
+        assert_eq!(capture(&stalled).health, Health::Failing);
     }
 }
