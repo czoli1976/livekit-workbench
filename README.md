@@ -1,5 +1,7 @@
 # Workbench for LiveKit
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/czoli1976/livekit-workbench)
+
 A desktop app for seeing what really happens to video in [LiveKit](https://livekit.io): pick a codec, an encoder (hardware or software), simulcast or SVC, a bitrate cap, and watch every stage of the pipeline, from capture through encode, send and the SFU to the decoder at the far end, with the numbers WebRTC itself reports.
 
 ![Workbench for LiveKit publishing H.264 simulcast through a local server: previews on top, pipeline cards outlined green](docs/screenshots/main.png)
