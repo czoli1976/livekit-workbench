@@ -15,6 +15,8 @@
 //!     --audio tone|MICROPHONE-NAME     also publish audio, and require it to arrive
 //!     --audio-kbps N                   Opus bitrate cap (default 32)
 //!     --no-dtx, --no-red               turn off Opus DTX or redundant audio
+//!     --up LOSS%,DELAY,JITTER,KBPS     impair the publisher's uplink (in-app relay)
+//!     --down LOSS%,DELAY,JITTER,KBPS   impair the subscriber's downlink
 //!     --lifecycle                      also exercise unpublish, publish, republish, switch source
 //!
 //! Connects with LIVEKIT_URL, LIVEKIT_API_KEY and LIVEKIT_API_SECRET, or the
@@ -30,6 +32,21 @@ use crate::capture::SourceKind;
 use crate::session::{
     AudioConfig, AudioInput, ConnectConfig, Layering, Phase, PublishConfig, Session,
 };
+
+/// "LOSS%,DELAY,JITTER,KBPS", trailing fields optional: "2" or "1,40,10,1500".
+fn parse_impairment(s: &str) -> crate::impair::Impairment {
+    let v: Vec<f32> = s
+        .split(',')
+        .map(|x| x.trim().parse().unwrap_or(0.0))
+        .collect();
+    let at = |i: usize| v.get(i).copied().unwrap_or(0.0);
+    crate::impair::Impairment {
+        loss_pct: at(0),
+        delay_ms: at(1) as u32,
+        jitter_ms: at(2) as u32,
+        rate_kbps: at(3) as u32,
+    }
+}
 
 fn opt<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
     args.iter()
@@ -85,6 +102,14 @@ fn line(s: &Session, sec: u64) -> (u32, f64) {
             }
         }
     }
+    if let Some(i) = &snap.impair {
+        for (name, l) in [("up", &i.up), ("down", &i.down)] {
+            println!(
+                "      relay {name}: {:.0} kbps out, dropped {:.1}% random + {:.1}% queue, queue {:.0} ms",
+                l.kbps, l.dropped_random_pct, l.dropped_queue_pct, l.queue_ms
+            );
+        }
+    }
     let a = &snap.audio;
     if !a.source.is_empty() || a.receiving {
         println!(
@@ -135,6 +160,7 @@ fn chrome_pub(
             decode: true,
             preview: false,
             e2ee_key: None,
+            impair: false,
         },
         None,
     );
@@ -307,6 +333,13 @@ pub fn run(args: &[String]) -> i32 {
             ..Default::default()
         },
     };
+    let impair_up = opt(args, "--up").map(parse_impairment);
+    let impair_down = opt(args, "--down").map(parse_impairment);
+    {
+        let links = session.shared.lock().links.clone();
+        *links.up.settings.lock() = impair_up.unwrap_or_default();
+        *links.down.settings.lock() = impair_down.unwrap_or_default();
+    }
     let room = format!("headless-{}", std::process::id());
     println!(
         "{} · room {room} · {url}",
@@ -340,6 +373,7 @@ pub fn run(args: &[String]) -> i32 {
             decode: true,
             preview: false,
             e2ee_key: opt(args, "--e2ee").map(str::to_string),
+            impair: impair_up.is_some() || impair_down.is_some(),
         },
         Some(publish.clone()),
     );

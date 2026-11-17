@@ -231,6 +231,32 @@ impl App {
             );
         }
 
+        // Impairment relay, one line per direction.
+        let impair = self.session.shared.lock().snapshot.impair.clone();
+        if let (true, Some(i)) = (phase.connected(), impair) {
+            for (name, l) in [("Uplink", &i.up), ("Downlink", &i.down)] {
+                let s = l.settings;
+                if s.is_clear() {
+                    continue;
+                }
+                ui.label(
+                    RichText::new(format!(
+                        "{name} impaired: {} % loss, {} ms ± {} ms, {} · passing {:.0} kbps, dropped {:.1} % random + {:.1} % queue, queue {:.0} ms",
+                        s.loss_pct,
+                        s.delay_ms,
+                        s.jitter_ms,
+                        if s.rate_kbps == 0 { "no rate cap".to_string() } else { format!("{} kbps cap", s.rate_kbps) },
+                        l.kbps,
+                        l.dropped_random_pct,
+                        l.dropped_queue_pct,
+                        l.queue_ms
+                    ))
+                    .small()
+                    .color(widgets::amber(ui)),
+                );
+            }
+        }
+
         // Audio, one line.
         let audio = self.session.shared.lock().snapshot.audio.clone();
         if phase.connected() && (!audio.source.is_empty() || audio.receiving) {

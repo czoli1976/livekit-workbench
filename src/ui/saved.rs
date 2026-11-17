@@ -50,6 +50,9 @@ pub struct Saved {
     pub audio_aec: Option<bool>,
     pub audio_agc: Option<bool>,
     pub audio_ns: Option<bool>,
+    pub impair: Option<bool>,
+    pub impair_up: Option<crate::impair::Impairment>,
+    pub impair_down: Option<crate::impair::Impairment>,
 }
 
 fn path() -> Option<PathBuf> {
@@ -104,6 +107,8 @@ fn degradation_from(s: &str) -> DegradationPreference {
 impl App {
     fn to_saved(&self) -> Saved {
         let f = &self.form;
+        let links = self.session.shared.lock().links.clone();
+        let (impair_up, impair_down) = (*links.up.settings.lock(), *links.down.settings.lock());
         let source = match &f.source {
             SourceKind::Camera(i) => match self.cameras.iter().find(|c| c.index == *i) {
                 Some(c) => format!("camera:{}", c.name),
@@ -146,6 +151,9 @@ impl App {
             audio_aec: Some(f.audio.echo_cancellation),
             audio_agc: Some(f.audio.auto_gain),
             audio_ns: Some(f.audio.noise_suppression),
+            impair: Some(self.impair_on),
+            impair_up: Some(impair_up),
+            impair_down: Some(impair_down),
         }
     }
 
@@ -246,6 +254,16 @@ impl App {
             if let Some(v) = v {
                 *slot = v;
             }
+        }
+        if let Some(v) = s.impair {
+            self.impair_on = v;
+        }
+        let links = self.session.shared.lock().links.clone();
+        if let Some(v) = s.impair_up {
+            *links.up.settings.lock() = v;
+        }
+        if let Some(v) = s.impair_down {
+            *links.down.settings.lock() = v;
         }
         self.sanitize_form();
     }

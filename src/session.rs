@@ -90,6 +90,9 @@ pub struct ConnectConfig {
     /// End-to-end encryption with this shared passphrase (AES-GCM frame
     /// encryption); both connections use it, so the subscriber can decrypt.
     pub e2ee_key: Option<String>,
+    /// Route both connections through the in-app relay that applies the
+    /// impairment settings in `Shared::links`.
+    pub impair: bool,
 }
 
 fn encryption(cfg: &ConnectConfig) -> Option<livekit::e2ee::E2eeOptions> {
@@ -230,6 +233,8 @@ pub struct Shared {
     /// The subscriber's frame decryption state when E2EE is on: "Ok",
     /// "DecryptionFailed", "MissingKey"…
     pub e2ee_state: Option<String>,
+    /// Impairment settings and counters, live while connected through the relay.
+    pub links: crate::impair::Links,
 }
 
 enum Command {
@@ -377,6 +382,7 @@ struct Prev {
     captured: u64,
     audio_out: Option<RawAudioOut>,
     audio_in: Option<RawAudioIn>,
+    links: Option<(crate::impair::LinkCounters, crate::impair::LinkCounters)>,
 }
 
 struct Connection {
@@ -399,6 +405,7 @@ struct Connection {
     /// The server's own rating of each connection (ConnectionQualityUpdate).
     quality_pub: Option<ConnectionQuality>,
     quality_sub: Option<ConnectionQuality>,
+    relay: Option<crate::impair::Relay>,
 }
 
 struct Engine {
@@ -590,12 +597,42 @@ impl Engine {
     }
 
     async fn connect(&mut self, cfg: ConnectConfig) -> Result<()> {
+        let relay = if cfg.impair {
+            let links = self.shared.lock().links.clone();
+            Some(crate::impair::Relay::start(&cfg.url, &links).await?)
+        } else {
+            None
+        };
+        let result = self.connect_rooms(cfg, relay.as_ref()).await;
+        match result {
+            Ok(mut conn) => {
+                conn.relay = relay;
+                self.conn = Some(conn);
+                Ok(())
+            }
+            Err(e) => {
+                if let Some(r) = relay {
+                    r.close().await;
+                }
+                Err(e)
+            }
+        }
+    }
+
+    async fn connect_rooms(
+        &mut self,
+        cfg: ConnectConfig,
+        relay: Option<&crate::impair::Relay>,
+    ) -> Result<Connection> {
         let suffix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() % 100_000)
             .unwrap_or(0);
 
         let mut sub_opts = RoomOptions::default();
+        if let Some(r) = relay {
+            sub_opts.rtc_config = r.rtc_config(false);
+        }
         sub_opts.auto_subscribe = true;
         sub_opts.adaptive_stream = false;
         sub_opts.encryption = encryption(&cfg);
@@ -614,6 +651,9 @@ impl Engine {
             Room::connect(&cfg.url, &pub_token, {
                 let mut o = RoomOptions::default();
                 o.encryption = encryption(&cfg);
+                if let Some(r) = relay {
+                    o.rtc_config = r.rtc_config(true);
+                }
                 o
             }),
         )
@@ -639,7 +679,10 @@ impl Engine {
             s.snapshot = Snapshot::default();
         }
         self.event(format!("Connected to room \"{}\"", cfg.room));
-        self.conn = Some(Connection {
+        if relay.is_some() {
+            self.event("Both connections go through the in-app impairment relay");
+        }
+        Ok(Connection {
             cfg,
             sub_room,
             sub_events,
@@ -657,8 +700,8 @@ impl Engine {
             requested: None,
             quality_pub: None,
             quality_sub: None,
-        });
-        Ok(())
+            relay: None,
+        })
     }
 
     async fn publish(&mut self, cfg: PublishConfig) {
@@ -937,6 +980,7 @@ impl Engine {
         // filters slow down socket close, so it finishes in the background.
         // Both rooms keep their event receivers drained meanwhile (see connect).
         let (pub_room, sub_room, pub_drain) = (conn.pub_room, conn.sub_room, conn.pub_drain);
+        let relay = conn.relay.take();
         let mut sub_events = conn.sub_events;
         let closing = self.shared.lock().closing.clone();
         closing.fetch_add(1, Ordering::SeqCst);
@@ -952,6 +996,9 @@ impl Engine {
                 }
             );
             log::info!("rooms closed in {} ms", t0.elapsed().as_millis());
+            if let Some(r) = relay {
+                r.close().await;
+            }
             pub_drain.abort();
             sub_drain.abort();
             closing.fetch_sub(1, Ordering::SeqCst);
@@ -1260,7 +1307,9 @@ impl Engine {
         // Capture thread failure ends the publish.
         let capture_error = conn.published.as_ref().and_then(|p| p.error.lock().take());
 
+        let mut links_now = None;
         {
+            let s_links = self.shared.lock().links.clone();
             let mut s = self.shared.lock();
             let snap = &mut s.snapshot;
             let first = conn.prev.at.is_none();
@@ -1485,6 +1534,49 @@ impl Engine {
             );
             snap.audio.source = audio_label;
 
+            // Impairment relay, both directions.
+            snap.impair = conn.relay.as_ref().map(|_| {
+                let up = s_links.up.counters.lock().clone();
+                let down = s_links.down.counters.lock().clone();
+                let prev = conn.prev.links.as_ref();
+                let row = |c: &crate::impair::LinkCounters,
+                           p: Option<&crate::impair::LinkCounters>,
+                           set: crate::impair::Impairment| {
+                    let (passed, lost, full) = match p {
+                        Some(p) => (
+                            c.passed.saturating_sub(p.passed),
+                            c.lost.saturating_sub(p.lost),
+                            c.queue_dropped.saturating_sub(p.queue_dropped),
+                        ),
+                        None => (0, 0, 0),
+                    };
+                    let total = (passed + lost + full) as f64;
+                    stats::LinkStats {
+                        settings: set,
+                        kbps: p
+                            .map(|p| stats::rate_mbps(c.bytes, p.bytes, dt) * 1000.0)
+                            .unwrap_or(0.0),
+                        dropped_random_pct: if total > 0.0 {
+                            lost as f64 * 100.0 / total
+                        } else {
+                            0.0
+                        },
+                        dropped_queue_pct: if total > 0.0 {
+                            full as f64 * 100.0 / total
+                        } else {
+                            0.0
+                        },
+                        queue_ms: c.queue_ms,
+                    }
+                };
+                let r = stats::ImpairStats {
+                    up: row(&up, prev.map(|p| &p.0), *s_links.up.settings.lock()),
+                    down: row(&down, prev.map(|p| &p.1), *s_links.down.settings.lock()),
+                };
+                links_now = Some((up, down));
+                r
+            });
+
             // Requested tile size.
             snap.requested_size = conn.requested.map(|(s, _)| s);
             snap.server_quality_pub = conn.quality_pub.map(|q| quality_label(q).to_string());
@@ -1624,6 +1716,7 @@ impl Engine {
             captured,
             audio_out,
             audio_in,
+            links: links_now,
         };
         (self.repaint)();
 

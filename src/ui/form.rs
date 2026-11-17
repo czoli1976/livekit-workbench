@@ -621,6 +621,10 @@ impl App {
         self.audio_section(ui);
 
         ui.separator();
+        // ---- Network
+        self.network_section(ui, phase);
+
+        ui.separator();
         // ---- Security
         section(ui, "Security");
         let connected = phase != Phase::Disconnected;
@@ -659,6 +663,74 @@ impl App {
                     self.session.switch_source(want);
                 }
             }
+        }
+    }
+
+    fn network_section(&mut self, ui: &mut egui::Ui, phase: Phase) {
+        section(ui, "Network impairment");
+        let connected = phase != Phase::Disconnected;
+        ui.add_enabled_ui(!connected, |ui| {
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.impair_on, "Route through impairment relay")
+                    .on_hover_text("Both connections go through a TURN relay inside the app, which drops, delays and rate-limits packets. No admin rights or system changes. Works with any server.");
+                widgets::badge(ui, "RECONNECT", super::theme::ACCENT_TEXT, super::theme::ACCENT_BG)
+                    .on_hover_text("Set before connecting. The settings below then change live.");
+            });
+        })
+        .response
+        .on_disabled_hover_text("Disconnect to turn the relay on or off.");
+        if !self.impair_on {
+            return;
+        }
+        let links = self.session.shared.lock().links.clone();
+        for (name, help, link) in [
+            (
+                "Publisher uplink",
+                "Packets from this app's publisher to the server.",
+                &links.up,
+            ),
+            (
+                "Subscriber downlink",
+                "Packets from the server to this app's subscriber.",
+                &links.down,
+            ),
+        ] {
+            let mut v = *link.settings.lock();
+            ui.label(RichText::new(name).strong()).on_hover_text(help);
+            egui::Grid::new(("impair", name))
+                .num_columns(2)
+                .spacing([8.0, 2.0])
+                .show(ui, |ui| {
+                    ui.label("Loss");
+                    ui.add(egui::Slider::new(&mut v.loss_pct, 0.0..=30.0).suffix(" %").step_by(0.5));
+                    ui.end_row();
+                    ui.label("Delay");
+                    ui.add(egui::Slider::new(&mut v.delay_ms, 0..=500).suffix(" ms"));
+                    ui.end_row();
+                    ui.label("Jitter");
+                    ui.add(egui::Slider::new(&mut v.jitter_ms, 0..=200).suffix(" ms"))
+                        .on_hover_text("Extra random delay up to this much. Packets stay in order.");
+                    ui.end_row();
+                    ui.label("Rate");
+                    ui.add(
+                        egui::Slider::new(&mut v.rate_kbps, 0..=20_000)
+                            .logarithmic(true)
+                            .suffix(" kbps")
+                            .custom_formatter(|x, _| {
+                                if x < 1.0 { "unlimited".into() } else { format!("{x:.0}") }
+                            }),
+                    )
+                    .on_hover_text("Bottleneck rate. Packets queue behind it; past 300 ms of queue they are dropped. 0 = unlimited.");
+                    ui.end_row();
+                });
+            *link.settings.lock() = v;
+        }
+        if !connected || !self.connected_impair {
+            ui.label(
+                RichText::new("Applies to the next connection.")
+                    .small()
+                    .color(widgets::weak(ui)),
+            );
         }
     }
 
