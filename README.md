@@ -102,7 +102,7 @@ livekit-workbench --headless --codec vp9 --encoder sw --layers L3T3_KEY --second
 livekit-workbench --headless --help
 ```
 
-Headless mode publishes and receives without a window, prints one line of stats per second, and exits 0 when video made the round trip. `--lifecycle` also exercises unpublish, publish, republish and a live source switch; `--ask 320x180` checks that asking for a smaller tile gets a smaller layer. `--audio tone` adds audio, and `--up 5,40` / `--down 0,0,0,1000` impair the links (`LOSS%,DELAY,JITTER,KBPS`).
+Headless mode publishes and receives without a window, prints one line of stats per second, and exits 0 when video made the round trip. `scripts/e2e.sh` runs the whole end-to-end suite (codecs, layers, lifecycle, audio, E2EE, impairment, input switching) against a running server. `--lifecycle` also exercises unpublish, publish, republish and a live source switch; `--ask 320x180` checks that asking for a smaller tile gets a smaller layer. `--audio tone` adds audio, and `--up 5,40` / `--down 0,0,0,1000` impair the links (`LOSS%,DELAY,JITTER,KBPS`).
 
 ## Good to know
 
