@@ -1,6 +1,6 @@
 [package]
 name = "livekit-workbench"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Workbench for LiveKit: a desktop app to explore LiveKit codecs, encoders, layers, bitrate and telemetry."

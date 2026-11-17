@@ -193,7 +193,7 @@ select_sdk() {
   local api; api="$(latest_crate livekit-api)"
   [[ -n "$api" ]] && cargo add "livekit-api@$api" --features rustls-tls-native-roots >/dev/null
   if [[ "$want" != "$TESTED_SDK" ]]; then
-    warn "Workbench 1.0 was tested with SDK $TESTED_SDK. If the build fails, run: scripts/build.sh --sdk-version $TESTED_SDK"
+    warn "Workbench 2.0 was tested with SDK $TESTED_SDK. If the build fails, run: scripts/build.sh --sdk-version $TESTED_SDK"
   fi
 }
 
