@@ -1458,8 +1458,11 @@ fn spawn_capture(
                 &c.stop,
                 |i| *c.info.lock() = i,
                 |mut buf| {
-                    if (buf.width(), buf.height()) != (pub_w, pub_h) {
-                        buf = buf.scale(pub_w as i32, pub_h as i32);
+                    // Fit within the publish size keeping the frame's shape: a
+                    // screen is rarely 16:9, and stretching it distorts text.
+                    let (fw, fh) = capture::fit_within(buf.width(), buf.height(), pub_w, pub_h);
+                    if (buf.width(), buf.height()) != (fw, fh) {
+                        buf = buf.scale(fw as i32, fh as i32);
                     }
                     if last_preview.elapsed() >= PREVIEW_INTERVAL {
                         last_preview = Instant::now();

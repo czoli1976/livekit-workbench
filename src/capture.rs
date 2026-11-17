@@ -18,6 +18,8 @@ pub enum SourceKind {
     Pattern,
     /// The pattern plus grain that changes every frame: needs a realistic bitrate.
     Detail,
+    /// A display or window. On macOS and Wayland the system picker asks which.
+    Screen,
 }
 
 impl SourceKind {
@@ -26,6 +28,7 @@ impl SourceKind {
             SourceKind::Camera(i) => format!("camera {i}"),
             SourceKind::Pattern => "synthetic pattern".into(),
             SourceKind::Detail => "synthetic detailed motion".into(),
+            SourceKind::Screen => "screen".into(),
         }
     }
 }
@@ -116,6 +119,7 @@ pub fn run(
         SourceKind::Camera(index) => {
             run_camera(*index, width, height, fps, stop, on_info, on_frame)
         }
+        SourceKind::Screen => run_screen(width, height, fps, stop, on_info, on_frame),
         SourceKind::Pattern | SourceKind::Detail => {
             let detail = *source == SourceKind::Detail;
             on_info(CaptureInfo {
@@ -161,6 +165,156 @@ enum CamMsg {
     Info(CaptureInfo),
     Frame(I420Buffer),
     Failed(String),
+}
+
+/// Capture a display or window with the SDK's desktop capturer. Frames are
+/// scaled to fit within width × height, keeping their shape.
+fn run_screen(
+    width: u32,
+    height: u32,
+    fps: u32,
+    stop: &AtomicBool,
+    on_info: impl FnOnce(CaptureInfo),
+    mut on_frame: impl FnMut(I420Buffer),
+) -> Result<()> {
+    use livekit::webrtc::desktop_capturer::{
+        DesktopCaptureSourceType, DesktopCapturer, DesktopCapturerOptions,
+    };
+    use livekit::webrtc::video_frame::VideoBuffer;
+    use std::sync::mpsc::{sync_channel, TryRecvError};
+
+    // macOS: ScreenCaptureKit's own picker chooses the display or window (the
+    // generic capturer; the screen capturer's picker offers displays only).
+    // Linux on Wayland: the desktop portal picker. Otherwise: the first screen.
+    let wayland = cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some();
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    let kind = if wayland || cfg!(target_os = "macos") {
+        DesktopCaptureSourceType::Generic
+    } else {
+        DesktopCaptureSourceType::Screen
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let kind = DesktopCaptureSourceType::Screen;
+    let use_picker = cfg!(target_os = "macos") || wayland;
+    let mut options = DesktopCapturerOptions::new(kind);
+    options.set_include_cursor(true);
+    let mut capturer = DesktopCapturer::new(options).ok_or_else(|| {
+        anyhow!(
+            "screen capture is not available here (the SDK could not create a desktop capturer)"
+        )
+    })?;
+    let source = if use_picker {
+        None
+    } else {
+        Some(
+            capturer
+                .get_source_list()
+                .into_iter()
+                .next()
+                .ok_or_else(|| anyhow!("no screen to capture"))?,
+        )
+    };
+
+    let (tx, rx) = sync_channel::<std::result::Result<I420Buffer, String>>(2);
+    capturer.start_capture(source, move |result| {
+        let msg = match result {
+            Ok(frame) => Ok(desktop_to_i420(&frame, width, height)),
+            Err(livekit::webrtc::desktop_capturer::CaptureError::Temporary) => return,
+            Err(e) => Err(format!("{e:?}")),
+        };
+        let _ = tx.try_send(msg);
+    });
+
+    let interval = Duration::from_secs_f64(1.0 / fps.max(1) as f64);
+    let started = Instant::now();
+    let mut on_info = Some(on_info);
+    let mut last_frame: Option<Instant> = None;
+    while !stop.load(Ordering::SeqCst) {
+        let tick = Instant::now();
+        capturer.capture_frame();
+        loop {
+            match rx.try_recv() {
+                Ok(Ok(buf)) => {
+                    if let Some(f) = on_info.take() {
+                        f(CaptureInfo {
+                            width: buf.width(),
+                            height: buf.height(),
+                            note: "screen".into(),
+                        });
+                    }
+                    last_frame = Some(Instant::now());
+                    on_frame(buf);
+                }
+                Ok(Err(e)) => return Err(anyhow!("screen capture stopped: {e}")),
+                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+            }
+        }
+        // The picker waits for the user, so allow longer for the first frame.
+        let limit = if last_frame.is_none() {
+            Duration::from_secs(120)
+        } else {
+            FRAME_GAP_TIMEOUT
+        };
+        let since = last_frame.unwrap_or(started);
+        if since.elapsed() > limit {
+            return Err(anyhow!(if last_frame.is_none() {
+                "no screen was chosen, or screen recording is not allowed for this app (System Settings › Privacy & Security › Screen & System Audio Recording)"
+            } else {
+                "the screen stopped sending frames"
+            }));
+        }
+        if let Some(rest) = interval.checked_sub(tick.elapsed()) {
+            std::thread::sleep(rest);
+        }
+    }
+    Ok(())
+}
+
+/// BGRA desktop frame to I420, scaled to fit within max_w × max_h keeping
+/// its shape (even dimensions, as I420 needs).
+fn desktop_to_i420(
+    frame: &livekit::webrtc::desktop_capturer::DesktopFrame,
+    max_w: u32,
+    max_h: u32,
+) -> I420Buffer {
+    let (w, h) = (
+        frame.width().max(2) as u32 & !1,
+        frame.height().max(2) as u32 & !1,
+    );
+    let mut full = I420Buffer::new(w, h);
+    let (sy, su, sv) = full.strides();
+    let (y, u, v) = full.data_mut();
+    // Desktop frames are B,G,R,A in memory, which libyuv calls "ARGB".
+    yuv_helper::argb_to_i420(
+        frame.data(),
+        frame.stride(),
+        y,
+        sy,
+        u,
+        su,
+        v,
+        sv,
+        w as i32,
+        h as i32,
+    );
+    let (fw, fh) = fit_within(w, h, max_w, max_h);
+    if (fw, fh) == (w, h) {
+        full
+    } else {
+        full.scale(fw as i32, fh as i32)
+    }
+}
+
+/// The largest size with the same shape as w × h that fits in max_w × max_h.
+pub fn fit_within(w: u32, h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
+    if w == 0 || h == 0 || (w <= max_w && h <= max_h) {
+        return (w & !1, h & !1);
+    }
+    let scale = (max_w as f64 / w as f64).min(max_h as f64 / h as f64);
+    (
+        ((w as f64 * scale) as u32).max(2) & !1,
+        ((h as f64 * scale) as u32).max(2) & !1,
+    )
 }
 
 /// No first frame within this long after the stream opened: give up.
@@ -571,6 +725,18 @@ pub fn camera_test() -> i32 {
                 return 1;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod screen_tests {
+    use super::fit_within;
+
+    #[test]
+    fn fit_keeps_shape() {
+        assert_eq!(fit_within(3024, 1964, 1920, 1080), (1662, 1080));
+        assert_eq!(fit_within(1280, 720, 1920, 1080), (1280, 720));
+        assert_eq!(fit_within(3840, 2160, 1920, 1080), (1920, 1080));
     }
 }
 

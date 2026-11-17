@@ -60,6 +60,8 @@ pub struct App {
     preview_sent: Option<session::PublishConfig>,
     /// Last local preview frame number seen, and when it changed.
     preview_seq: (u64, Instant),
+    /// The input in the previous frame, to notice a switch to Screen.
+    last_source: SourceKind,
     camera_error: Option<String>,
 
     previews: bool,
@@ -153,6 +155,7 @@ impl App {
             formats_retry: Instant::now(),
             preview_sent: None,
             preview_seq: (0, Instant::now()),
+            last_source: SourceKind::Detail,
             camera_error: None,
             previews: true,
             chart: ChartMetric::Bitrate,
@@ -228,6 +231,7 @@ impl App {
                 }
             }
         }
+        app.last_source = app.form.source.clone();
         app
     }
 
@@ -1058,7 +1062,16 @@ impl eframe::App for App {
         self.note_seen();
         self.save_settings(false);
         // Show the chosen source in the local tile even when not publishing.
-        let want = self.previews.then(|| self.form.to_config());
+        // Choosing the screen: publish it as a screen share with the detail hint.
+        if self.form.source == SourceKind::Screen && self.last_source != SourceKind::Screen {
+            self.form.screen_share = true;
+            self.form.detail_hint = true;
+        }
+        self.last_source = self.form.source.clone();
+        // No preview before publishing for a screen: on macOS each capture start
+        // opens the system picker, so the user would have to pick twice.
+        let want = (self.previews && self.form.source != SourceKind::Screen)
+            .then(|| self.form.to_config());
         // No preview frame for 3 s while one should show (the source failed to
         // start, e.g. camera access still pending at start-up): ask again.
         let seq = self.session.shared.lock().local_preview.lock().seq;
