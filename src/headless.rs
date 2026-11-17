@@ -11,6 +11,7 @@
 //!     --seconds N                      (default 10)
 //!     --ask WxH                        ask the SFU for a layer that fits a WxH tile
 //!     --e2ee PASSPHRASE                end-to-end encryption with a shared key
+//!                                      (or LIVEKIT_E2EE_KEY, kept out of process listings)
 //!     --detail-hint                    content hint Detail / text (screencast flag)
 //!     --audio tone|MICROPHONE-NAME     also publish audio, and require it to arrive
 //!     --audio-kbps N                   Opus bitrate cap (default 32)
@@ -34,18 +35,32 @@ use crate::session::{
 };
 
 /// "LOSS%,DELAY,JITTER,KBPS", trailing fields optional: "2" or "1,40,10,1500".
-fn parse_impairment(s: &str) -> crate::impair::Impairment {
-    let v: Vec<f32> = s
-        .split(',')
-        .map(|x| x.trim().parse().unwrap_or(0.0))
-        .collect();
-    let at = |i: usize| v.get(i).copied().unwrap_or(0.0);
-    crate::impair::Impairment {
-        loss_pct: at(0),
-        delay_ms: at(1) as u32,
-        jitter_ms: at(2) as u32,
-        rate_kbps: at(3) as u32,
+/// A field that is given must be a valid number.
+fn parse_impairment(s: &str) -> Result<crate::impair::Impairment, String> {
+    let names = ["loss %", "delay ms", "jitter ms", "rate kbps"];
+    let mut v = [0.0f64; 4];
+    let fields: Vec<&str> = s.split(',').map(str::trim).collect();
+    if fields.len() > 4 {
+        return Err(format!(
+            "\"{s}\": at most 4 fields, LOSS%,DELAY,JITTER,KBPS"
+        ));
     }
+    for (i, f) in fields.iter().enumerate() {
+        v[i] = f
+            .parse::<f64>()
+            .ok()
+            .filter(|x| x.is_finite() && *x >= 0.0)
+            .ok_or_else(|| format!("\"{s}\": {} must be a number ≥ 0, got \"{f}\"", names[i]))?;
+    }
+    if v[0] > 100.0 {
+        return Err(format!("\"{s}\": loss must be at most 100 %"));
+    }
+    Ok(crate::impair::Impairment {
+        loss_pct: v[0] as f32,
+        delay_ms: v[1] as u32,
+        jitter_ms: v[2] as u32,
+        rate_kbps: v[3] as u32,
+    })
 }
 
 fn opt<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
@@ -245,7 +260,7 @@ pub fn run(args: &[String]) -> i32 {
             "{}",
             include_str!("headless.rs")
                 .lines()
-                .take(17)
+                .take_while(|l| l.starts_with("//!"))
                 .map(|l| l.trim_start_matches("//!"))
                 .collect::<Vec<_>>()
                 .join("\n")
@@ -333,13 +348,28 @@ pub fn run(args: &[String]) -> i32 {
             ..Default::default()
         },
     };
-    let impair_up = opt(args, "--up").map(parse_impairment);
-    let impair_down = opt(args, "--down").map(parse_impairment);
+    let parsed = (
+        opt(args, "--up").map(parse_impairment).transpose(),
+        opt(args, "--down").map(parse_impairment).transpose(),
+    );
+    let (impair_up, impair_down) = match parsed {
+        (Ok(u), Ok(d)) => (u, d),
+        (Err(e), _) | (_, Err(e)) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    };
     {
         let links = session.shared.lock().links.clone();
         *links.up.settings.lock() = impair_up.unwrap_or_default();
         *links.down.settings.lock() = impair_down.unwrap_or_default();
     }
+    // The passphrase: LIVEKIT_E2EE_KEY keeps it out of process listings and
+    // shell history; --e2ee still works for quick tests.
+    let e2ee_key = std::env::var("LIVEKIT_E2EE_KEY")
+        .ok()
+        .or_else(|| opt(args, "--e2ee").map(str::to_string))
+        .filter(|k| !k.is_empty());
     let room = format!("headless-{}", std::process::id());
     println!(
         "{} · room {room} · {url}",
@@ -352,7 +382,7 @@ pub fn run(args: &[String]) -> i32 {
             crate::session::viewer_token(&key, &secret, &room, "browser-1"),
         ) {
             (Ok(v), Ok(tok)) => {
-                println!("viewer: {}", v.link(&url, &tok, true, opt(args, "--e2ee")));
+                println!("viewer: {}", v.link(&url, &tok, true, e2ee_key.as_deref()));
                 Some(v)
             }
             _ => None,
@@ -372,7 +402,7 @@ pub fn run(args: &[String]) -> i32 {
             room,
             decode: true,
             preview: false,
-            e2ee_key: opt(args, "--e2ee").map(str::to_string),
+            e2ee_key: e2ee_key.clone(),
             impair: impair_up.is_some() || impair_down.is_some(),
         },
         Some(publish.clone()),
@@ -503,5 +533,22 @@ pub fn run(args: &[String]) -> i32 {
     } else {
         println!("RESULT: FAILED (received video: {received})");
         1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_impairment;
+
+    #[test]
+    fn impairment_fields() {
+        let i = parse_impairment("2").unwrap();
+        assert_eq!((i.loss_pct, i.delay_ms, i.rate_kbps), (2.0, 0, 0));
+        let i = parse_impairment("1, 40,10,1500").unwrap();
+        assert_eq!((i.delay_ms, i.jitter_ms, i.rate_kbps), (40, 10, 1500));
+        assert!(parse_impairment("0,0,0,1O00").is_err());
+        assert!(parse_impairment("0,,5").is_err());
+        assert!(parse_impairment("-1").is_err());
+        assert!(parse_impairment("1,2,3,4,5").is_err());
     }
 }

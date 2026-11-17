@@ -46,7 +46,7 @@
   <h2>Browser</h2>
   <pre id="ua">-</pre>
 </main>
-<script src="https://cdn.jsdelivr.net/npm/livekit-client@2.24.0/dist/livekit-client.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2.24.0/dist/livekit-client.umd.min.js" integrity="sha384-Hl+KHTfsO7AqyofjkXnR+WrOR0RM4MGeruUR9Rulz3adxJKuh0LQUYWvVwgKm0m+" crossorigin="anonymous"></script>
 <script>
 const TOPIC = 'workbench.viewer-stats';
 const $ = (id) => document.getElementById(id);
@@ -73,6 +73,9 @@ const url = params.get('url'), token = params.get('token');
 const adaptive = params.get('adaptive') === '1';
 const e2eeKey = params.get('e2ee');
 const SDK = 'https://cdn.jsdelivr.net/npm/livekit-client@2.24.0/dist/';
+// SHA-384 of livekit-client@2.24.0's E2EE worker: the page holds the passphrase,
+// so the worker code fetched from the CDN must be exactly that release.
+const WORKER_SHA384 = 'tfYTPFUlndJ+v/Jp1YBMF669xcYEluL/KLeaZUV8VwECDRyq1rpWIFdq9Q3sBXnA';
 let videoEl = null;
 let room = null, track = null, prev = null;
 
@@ -142,21 +145,43 @@ async function main() {
   if (!window.LivekitClient) { setStatus('Could not load the LiveKit JavaScript SDK from the CDN.', 'bad'); return; }
   const LK = window.LivekitClient;
   const options = { adaptiveStream: adaptive, dynacast: false };
+  let worker = null;
   if (e2eeKey) {
+    if (!LK.isE2EESupported()) {
+      setStatus('This browser cannot decrypt end-to-end encrypted media (no encoded-stream support). Use a current Chrome, Edge, Firefox or Safari.', 'bad');
+      return;
+    }
     // Same shared passphrase as the app; the worker decrypts frames. A worker
-    // cannot be started from another origin directly, so load it as a blob.
+    // cannot be started from another origin directly, so load it as a blob,
+    // after checking it is the expected release.
     try {
       const keyProvider = new LK.ExternalE2EEKeyProvider();
       await keyProvider.setKey(e2eeKey);
-      const src = await (await fetch(SDK + 'livekit-client.e2ee.worker.js')).text();
-      const worker = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+      const res = await fetch(SDK + 'livekit-client.e2ee.worker.js');
+      if (!res.ok) throw new Error('worker download failed (HTTP ' + res.status + ')');
+      const bytes = await res.arrayBuffer();
+      const digest = btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.digest('SHA-384', bytes))));
+      if (digest !== WORKER_SHA384) throw new Error('the downloaded worker does not match livekit-client 2.24.0');
+      const blobUrl = URL.createObjectURL(new Blob([bytes], { type: 'text/javascript' }));
+      worker = new Worker(blobUrl);
+      URL.revokeObjectURL(blobUrl);
       options.e2ee = { keyProvider, worker };
-    } catch (e) { setStatus('Could not set up end-to-end encryption: ' + e.message, 'bad'); return; }
+    } catch (e) {
+      if (worker) worker.terminate();
+      setStatus('Could not set up end-to-end encryption: ' + e.message, 'bad');
+      return;
+    }
   }
-  room = new LK.Room(options);
-  if (e2eeKey) {
-    room.on(LK.RoomEvent.EncryptionError, (e) => setStatus('Decryption failed: ' + (e && e.message || e), 'bad'));
-    await room.setE2EEEnabled(true);
+  try {
+    room = new LK.Room(options);
+    if (e2eeKey) {
+      room.on(LK.RoomEvent.EncryptionError, (e) => setStatus('Decryption failed: ' + (e && e.message || e), 'bad'));
+      await room.setE2EEEnabled(true);
+    }
+  } catch (e) {
+    if (worker) worker.terminate();
+    setStatus('Could not set up end-to-end encryption: ' + e.message, 'bad');
+    return;
   }
   room.on(LK.RoomEvent.TrackSubscribed, (t, pub, participant) => {
     if (t.kind !== 'video') return;

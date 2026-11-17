@@ -108,12 +108,17 @@ pub struct App {
     connected_impair: bool,
     /// Microphone names, listed the first time the audio input list opens.
     microphones: Option<Vec<String>>,
+    /// Why the microphones could not be listed; the list is retried on open.
+    mic_error: Option<String>,
     e2ee_key: String,
     /// The passphrase of the current connection, if it is encrypted.
     connected_e2ee: Option<String>,
     /// Settings as last written to settings.json, and when.
     saved: Option<saved::Saved>,
     saved_at: Instant,
+    /// False for scripted launches (WB_OPEN) and when the settings file could
+    /// not be read: then nothing is written over the user's settings.
+    persist_settings: bool,
     /// Newer livekit-server check and update, shared with background work.
     server_update: Arc<Mutex<crate::server_update::UpdateState>>,
     /// Browser viewers ask the SFU for a layer that fits their video element.
@@ -193,10 +198,12 @@ impl App {
             impair_on: false,
             connected_impair: false,
             microphones: None,
+            mic_error: None,
             connected_e2ee: None,
-            e2ee_key: "workbench-test-key".into(),
+            e2ee_key: random_passphrase(),
             saved: None,
             saved_at: Instant::now(),
+            persist_settings: std::env::var_os("WB_OPEN").is_none(),
             server_update: Default::default(),
             autoconnect_pending: std::env::var_os("WB_AUTOCONNECT").is_some(),
             rt,
@@ -237,10 +244,18 @@ impl App {
             app.form.source = SourceKind::Pattern;
         }
         // Settings from the last run, unless this is a scripted dev launch.
-        if std::env::var_os("WB_OPEN").is_none() {
-            if let Some(s) = saved::load() {
-                app.apply_saved(&s);
-                app.saved = Some(s);
+        if app.persist_settings {
+            match saved::load() {
+                Ok(Some(s)) => {
+                    app.apply_saved(&s);
+                    app.saved = Some(s);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    log::warn!("settings: {e}");
+                    // A file that could not even be read is not overwritten.
+                    app.persist_settings = e.contains("is not valid");
+                }
             }
         }
         app.last_source = app.form.source.clone();
@@ -474,6 +489,10 @@ impl App {
                 return;
             }
         };
+        if self.e2ee_on && self.e2ee_key.trim().is_empty() {
+            self.notify("End-to-end encryption is on but the passphrase is empty. Enter one, or turn encryption off.");
+            return;
+        }
         let room = self.room.trim().to_string();
         if room.is_empty() {
             self.notify("Enter a room name.");
@@ -497,8 +516,7 @@ impl App {
             room,
             decode: true,
             preview: self.previews,
-            e2ee_key: (self.e2ee_on && !self.e2ee_key.trim().is_empty())
-                .then(|| self.e2ee_key.trim().to_string()),
+            e2ee_key: self.e2ee_on.then(|| self.e2ee_key.trim().to_string()),
             impair: self.impair_on,
         };
         self.ask_sent = None;
@@ -1205,4 +1223,26 @@ impl eframe::App for App {
         self.save_settings(true);
         self.shutdown();
     }
+}
+
+/// A fresh passphrase for first use, so nobody starts on a key published in
+/// this source. Not a password generator: it is a test key, saved in plain text.
+fn random_passphrase() -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    h.update(now.as_nanos().to_le_bytes());
+    h.update(std::process::id().to_le_bytes());
+    let local = 0u8;
+    h.update((&local as *const u8 as usize).to_le_bytes());
+    let d = h.finalize();
+    format!(
+        "wb-{}",
+        d.iter()
+            .take(8)
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    )
 }
