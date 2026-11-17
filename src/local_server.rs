@@ -351,6 +351,8 @@ impl LocalServer {
             inner.state = ServerState::Starting;
             inner.stats = ServerStats::default();
             inner.prev_metrics = None;
+            inner.hist.clear();
+            inner.counters.clear();
         }
         // A server this app started in an earlier run that ended without
         // cleaning up (crash, force quit) is orphaned: its log pipe is gone,
