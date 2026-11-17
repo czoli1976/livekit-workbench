@@ -606,6 +606,11 @@ impl Engine {
         let result = self.connect_rooms(cfg, relay.as_ref()).await;
         match result {
             Ok(mut conn) => {
+                if relay.is_some() {
+                    let links = self.shared.lock().links.clone();
+                    links.up.armed.store(true, Ordering::Relaxed);
+                    links.down.armed.store(true, Ordering::Relaxed);
+                }
                 conn.relay = relay;
                 self.conn = Some(conn);
                 Ok(())
@@ -994,6 +999,11 @@ impl Engine {
         // Both rooms keep their event receivers drained meanwhile (see connect).
         let (pub_room, sub_room, pub_drain) = (conn.pub_room, conn.sub_room, conn.pub_drain);
         let relay = conn.relay.take();
+        {
+            let links = self.shared.lock().links.clone();
+            links.up.armed.store(false, Ordering::Relaxed);
+            links.down.armed.store(false, Ordering::Relaxed);
+        }
         let mut sub_events = conn.sub_events;
         let closing = self.shared.lock().closing.clone();
         closing.fetch_add(1, Ordering::SeqCst);

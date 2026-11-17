@@ -116,7 +116,7 @@ The app remembers these settings and the view choices between launches. They are
 - **Publisher uplink** shapes what the publisher sends to the server.
 - **Subscriber downlink** shapes what the server sends to the subscriber.
 
-Each direction has four settings, and you can change them live while connected:
+Impairment starts once both connections are up: delay during WebRTC's connection setup sometimes stopped the publisher connecting. Each direction has four settings, and you can change them live while connected:
 
 - **Loss:** random, in percent.
 - **Delay:** fixed delay, in ms.

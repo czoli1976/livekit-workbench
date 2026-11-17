@@ -743,7 +743,7 @@ impl App {
                 ui.checkbox(&mut self.impair_on, "Route through impairment relay")
                     .on_hover_text("Both connections go through a TURN relay inside the app, which drops, delays and rate-limits packets. No admin rights or system changes. Works with any server.");
                 widgets::badge(ui, "RECONNECT", super::theme::ACCENT_TEXT, super::theme::ACCENT_BG)
-                    .on_hover_text("Set before connecting. The settings below then change live.");
+                    .on_hover_text("Set before connecting. Impairment starts once both connections are up, and the settings below then change live.");
             });
         })
         .response
