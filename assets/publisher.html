@@ -39,7 +39,7 @@
   <p class="note">Chrome was started by the Workbench app with the <code>WebRTC-FlexFEC-03</code> field trials, so it can offer FlexFEC-03 to the server. The difference between "all bytes on the wire" and "media sent" is mostly FEC plus RTCP and header overhead. This page reports these numbers to the app over the room's data channel (topic <code>workbench.publisher-stats</code>).</p>
   <p class="note" id="ua"></p>
 </main>
-<script src="https://cdn.jsdelivr.net/npm/livekit-client@2.24.0/dist/livekit-client.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2.24.0/dist/livekit-client.umd.min.js" integrity="sha384-Hl+KHTfsO7AqyofjkXnR+WrOR0RM4MGeruUR9Rulz3adxJKuh0LQUYWvVwgKm0m+" crossorigin="anonymous"></script>
 <script>
 const TOPIC = 'workbench.publisher-stats';
 const $ = (id) => document.getElementById(id);

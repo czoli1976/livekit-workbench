@@ -166,14 +166,10 @@ impl AudioInput {
 }
 
 /// The microphones the SDK's platform audio can open.
-pub fn microphones() -> Vec<String> {
-    match PlatformAudio::new() {
-        Ok(a) => a.recording_devices().map(|d| d.name).collect(),
-        Err(e) => {
-            log::warn!("listing microphones: {e}");
-            Vec::new()
-        }
-    }
+pub fn microphones() -> Result<Vec<String>, String> {
+    PlatformAudio::new()
+        .map(|a| a.recording_devices().map(|d| d.name).collect())
+        .map_err(|e| format!("could not list microphones: {e}"))
 }
 
 #[derive(Clone, Debug, PartialEq)]

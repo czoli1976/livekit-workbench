@@ -724,7 +724,11 @@ impl App {
         if publishing {
             if let Some(active) = &active {
                 let want = self.form.to_config();
-                if diff(active, &want).live && self.form != before {
+                // Switching to the screen republishes instead: it also changes
+                // the track source and content hint, and the picker opens once.
+                let to_screen =
+                    want.source == SourceKind::Screen && active.source != SourceKind::Screen;
+                if diff(active, &want).live && self.form != before && !to_screen {
                     self.session.switch_source(want);
                 }
             }
@@ -821,21 +825,40 @@ impl App {
                     });
                     let a = &mut self.form.audio;
                     let mics = &mut self.microphones;
-                    egui::ComboBox::from_id_salt("audio-input")
-                        .selected_text(a.input.label())
-                        .width(220.0)
-                        .show_ui(ui, |ui| {
-                            // Listing opens the platform audio device, so only on demand.
-                            let list = mics.get_or_insert_with(crate::session::microphones);
-                            for name in list.iter() {
-                                ui.selectable_value(&mut a.input, AudioInput::Microphone(name.clone()), name);
-                            }
-                            ui.selectable_value(&mut a.input, AudioInput::Tone, "Synthetic tone")
-                                .on_hover_text("A 440 Hz beep, 0.6 s on and 0.4 s off. Needs no microphone and plays nothing here.");
-                            ui.selectable_value(&mut a.input, AudioInput::Off, "Off");
-                        });
+                    let mic_error = &mut self.mic_error;
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt("audio-input")
+                            .selected_text(a.input.label())
+                            .width(220.0)
+                            .show_ui(ui, |ui| {
+                                // Listing opens the platform audio device, so only
+                                // on demand; only a successful list is kept.
+                                if mics.is_none() {
+                                    match crate::session::microphones() {
+                                        Ok(l) => {
+                                            *mics = Some(l);
+                                            *mic_error = None;
+                                        }
+                                        Err(e) => *mic_error = Some(e),
+                                    }
+                                }
+                                for name in mics.clone().unwrap_or_default() {
+                                    ui.selectable_value(&mut a.input, AudioInput::Microphone(name.clone()), name);
+                                }
+                                ui.selectable_value(&mut a.input, AudioInput::Tone, "Synthetic tone")
+                                    .on_hover_text("A 440 Hz beep, 0.6 s on and 0.4 s off. Needs no microphone and plays nothing here.");
+                                ui.selectable_value(&mut a.input, AudioInput::Off, "Off");
+                            });
+                        if ui.small_button("⟳").on_hover_text("List the microphones again").clicked() {
+                            *mics = None;
+                            *mic_error = None;
+                        }
+                    });
                 });
             });
+            if let Some(e) = &self.mic_error {
+                ui.label(RichText::new(e).small().color(widgets::red(ui)));
+            }
             if let Some(level) = level {
                 ui.add_space(4.0);
                 widgets::level_meter(ui, level, 8.0);
