@@ -147,7 +147,23 @@ impl LocalServer {
             inner.stats = ServerStats::default();
             inner.prev_metrics = None;
         }
-        if port_open(opts.port).await {
+        // A server left by the previous run may still be shutting down: it
+        // keeps the port open for a moment, then refuses connections. Adopt
+        // one only if it is still listening a second later.
+        let adopt = port_open(opts.port).await && {
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            port_open(opts.port).await
+        };
+        if !adopt && port_open(opts.port).await {
+            // Still closing: give it a little longer before starting ours.
+            for _ in 0..20 {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                if !port_open(opts.port).await {
+                    break;
+                }
+            }
+        }
+        if adopt {
             let mut inner = self.inner.lock();
             inner.state = ServerState::External;
             inner.stats.started_at = None;
@@ -273,6 +289,14 @@ impl LocalServer {
         let mut inner = self.inner.lock();
         if let Some(child) = inner.child.as_mut() {
             let _ = child.start_kill();
+            // Wait briefly so the next launch does not find it half closed.
+            let started = Instant::now();
+            while started.elapsed() < Duration::from_secs(2) {
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
         }
         inner.child = None;
         inner.state = ServerState::Stopped;

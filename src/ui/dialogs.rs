@@ -28,6 +28,8 @@ impl App {
         egui::Window::new("Host capabilities")
             .open(&mut open)
             .default_width(820.0)
+            .default_height(640.0)
+            .vscroll(true)
             .resizable(true)
             .collapsible(false)
             .show(ctx, |ui| {
@@ -91,6 +93,8 @@ impl App {
                 });
 
                 ui.add_space(10.0);
+                self.frameworks_ui(ui);
+                ui.add_space(10.0);
                 ui.label(RichText::new("What can change while publishing").strong());
                 ui.label(
                     RichText::new("The SDK keeps a published track's RTP sender private, so most encoder settings need a republish. This build uses the stock SDK.")
@@ -136,6 +140,113 @@ impl App {
                 ui.label(RichText::new(self.caps.decoder_mimes.join("  ")).small().monospace());
             });
         self.show_caps = open;
+    }
+
+    /// Per-framework view, profiles, what this session saw, and notes.
+    fn frameworks_ui(&mut self, ui: &mut egui::Ui) {
+        let names = |v: &[livekit::options::VideoCodec]| {
+            if v.is_empty() {
+                "–".to_string()
+            } else {
+                v.iter()
+                    .map(|c| codec_name(*c))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        };
+        ui.label(RichText::new("Video frameworks this build uses").strong());
+        egui::Grid::new("frameworks")
+            .striped(true)
+            .spacing([16.0, 5.0])
+            .show(ui, |ui| {
+                for h in ["Framework", "Kind", "Encodes", "Decodes", "Decode list"] {
+                    ui.label(RichText::new(h).strong());
+                }
+                ui.end_row();
+                for f in &self.caps.frameworks {
+                    ui.label(&f.name);
+                    if f.hardware {
+                        ui.colored_label(widgets::green(ui), "hardware");
+                    } else {
+                        ui.label("software");
+                    }
+                    ui.label(names(&f.encodes));
+                    ui.label(names(&f.decodes));
+                    ui.label(
+                        RichText::new(f.decode_basis)
+                            .small()
+                            .color(widgets::weak(ui)),
+                    );
+                    ui.end_row();
+                }
+            });
+        ui.label(
+            RichText::new("Encoders come from the SDK's per-backend lists. The SDK does not say which decoder handles a codec until it decodes one, so the decode column follows its source for this platform; the table below confirms it.")
+                .small()
+                .color(widgets::weak(ui)),
+        );
+        for h in &self.caps.hints {
+            ui.colored_label(widgets::amber(ui), h);
+        }
+
+        ui.add_space(8.0);
+        ui.label(RichText::new("Profiles").strong());
+        egui::Grid::new("profiles")
+            .striped(true)
+            .spacing([16.0, 5.0])
+            .show(ui, |ui| {
+                for h in ["Codec", "Can send", "Can receive"] {
+                    ui.label(RichText::new(h).strong());
+                }
+                ui.end_row();
+                for codec in crate::capabilities::ALL_CODECS {
+                    let find = |list: &Vec<(livekit::options::VideoCodec, Vec<String>)>| {
+                        list.iter()
+                            .find(|(c, _)| *c == codec)
+                            .map(|(_, p)| p.join(", "))
+                            .unwrap_or_else(|| "–".into())
+                    };
+                    ui.label(codec_name(codec));
+                    ui.label(find(&self.caps.send_profiles));
+                    ui.label(find(&self.caps.recv_profiles));
+                    ui.end_row();
+                }
+            });
+        ui.label(
+            RichText::new("Read-only: the SDK offers no profile choice. For H.264 it prefers Constrained Baseline for browser compatibility, and the profile is settled with the server when the track is published; the one in use shows in Stats.")
+                .small()
+                .color(widgets::weak(ui)),
+        );
+
+        ui.add_space(8.0);
+        ui.label(RichText::new("Seen in this session").strong());
+        if self.seen.is_empty() {
+            ui.label(RichText::new("Nothing published yet. Each codec you publish adds the encoder and decoder WebRTC actually used.").color(widgets::weak(ui)));
+        } else {
+            egui::Grid::new("seen")
+                .striped(true)
+                .spacing([16.0, 5.0])
+                .show(ui, |ui| {
+                    for h in ["Codec and profile", "Encoder used", "Decoder used"] {
+                        ui.label(RichText::new(h).strong());
+                    }
+                    ui.end_row();
+                    for (codec, (enc, dec)) in &self.seen {
+                        ui.label(codec);
+                        ui.label(if enc.is_empty() {
+                            "–".into()
+                        } else {
+                            enc.iter().cloned().collect::<Vec<_>>().join(", ")
+                        });
+                        ui.label(if dec.is_empty() {
+                            "–".into()
+                        } else {
+                            dec.iter().cloned().collect::<Vec<_>>().join(", ")
+                        });
+                        ui.end_row();
+                    }
+                });
+        }
     }
 
     pub(super) fn profiles_window(&mut self, ctx: &egui::Context) {

@@ -143,6 +143,24 @@ pub struct HostCaps {
     pub backends: Vec<VideoEncoderBackend>,
     /// Decodable codec MIME types, as the receiver advertises them.
     pub decoder_mimes: Vec<String>,
+    /// Readable profile names per codec, for sending and for receiving.
+    pub send_profiles: Vec<(VideoCodec, Vec<String>)>,
+    pub recv_profiles: Vec<(VideoCodec, Vec<String>)>,
+    /// One entry per video framework this build can use, hardware first.
+    pub frameworks: Vec<Framework>,
+    /// Hardware that exists but this build cannot use, and similar notes.
+    pub hints: Vec<String>,
+}
+
+/// A video framework and what it does here.
+#[derive(Clone, Debug)]
+pub struct Framework {
+    pub name: String,
+    pub hardware: bool,
+    pub encodes: Vec<VideoCodec>,
+    pub decodes: Vec<VideoCodec>,
+    /// Where the decode list comes from.
+    pub decode_basis: &'static str,
 }
 
 impl HostCaps {
@@ -219,11 +237,20 @@ impl HostCaps {
                 }
             })
             .collect();
-        Self {
+        let send_profiles = profiles(&factory.get_rtp_sender_capabilities(MediaType::Video).codecs);
+        let recv_profiles = profiles(&receiver.codecs);
+        let mut host = Self {
             codecs,
             backends,
             decoder_mimes,
-        }
+            send_profiles,
+            recv_profiles,
+            frameworks: Vec::new(),
+            hints: Vec::new(),
+        };
+        host.frameworks = frameworks(&host, &hw_lists, &software);
+        host.hints = platform_hints(&host);
+        host
     }
 
     pub fn get(&self, codec: VideoCodec) -> Option<&CodecCaps> {
@@ -261,6 +288,190 @@ impl HostCaps {
             _ => "none".to_string(),
         }
     }
+}
+
+fn codec_of_mime(mime: &str) -> Option<VideoCodec> {
+    let m = mime.to_ascii_uppercase();
+    let name = m.rsplit('/').next().unwrap_or("");
+    ALL_CODECS.iter().copied().find(|c| match c {
+        VideoCodec::H265 => name == "H265" || name == "HEVC",
+        VideoCodec::H264 => name == "H264",
+        VideoCodec::AV1 => name == "AV1",
+        VideoCodec::VP9 => name == "VP9",
+        VideoCodec::VP8 => name == "VP8",
+    })
+}
+
+/// Readable profile names per codec from WebRTC's codec capabilities.
+fn profiles(
+    caps: &[livekit::webrtc::rtp_parameters::RtpCodecCapability],
+) -> Vec<(VideoCodec, Vec<String>)> {
+    ALL_CODECS
+        .iter()
+        .map(|&codec| {
+            let mut lines: Vec<String> = caps
+                .iter()
+                .filter(|c| codec_of_mime(&c.mime_type) == Some(codec))
+                .map(|c| profile_label(codec, c.sdp_fmtp_line.as_deref().unwrap_or("")))
+                .collect();
+            lines.sort();
+            lines.dedup();
+            (codec, lines)
+        })
+        .filter(|(_, l)| !l.is_empty())
+        .collect()
+}
+
+/// A readable profile name from an SDP fmtp line ("Constrained Baseline 3.1").
+pub fn profile_label(codec: VideoCodec, fmtp: &str) -> String {
+    let param = |k: &str| {
+        fmtp.split(';')
+            .find_map(|p| p.trim().strip_prefix(&format!("{k}=")).map(str::to_string))
+    };
+    match codec {
+        VideoCodec::H264 => match param("profile-level-id") {
+            Some(id) if id.len() == 6 => {
+                let head = id[..4].to_ascii_lowercase();
+                let profile = match head.as_str() {
+                    "42e0" | "4240" | "42c0" => "Constrained Baseline",
+                    p if p.starts_with("42") => "Baseline",
+                    p if p.starts_with("4d") => "Main",
+                    "640c" | "64c0" => "Constrained High",
+                    p if p.starts_with("64") => "High",
+                    p if p.starts_with("f4") => "High 4:4:4",
+                    _ => "other",
+                };
+                let level = u8::from_str_radix(&id[4..], 16)
+                    .map(|l| format!(" {}.{}", l / 10, l % 10))
+                    .unwrap_or_default();
+                format!("{profile}{level}")
+            }
+            _ => "default".into(),
+        },
+        VideoCodec::H265 => match param("profile-id").as_deref() {
+            Some("1") => "Main".into(),
+            Some("2") => "Main 10".into(),
+            Some(p) => format!("profile {p}"),
+            None => "default".into(),
+        },
+        VideoCodec::VP9 => format!(
+            "profile {}",
+            param("profile-id").unwrap_or_else(|| "0".into())
+        ),
+        VideoCodec::AV1 => match param("profile").as_deref() {
+            Some("1") => "High".into(),
+            Some("2") => "Professional".into(),
+            _ => "Main".into(),
+        },
+        VideoCodec::VP8 => "default".into(),
+    }
+}
+
+fn frameworks(
+    host: &HostCaps,
+    hw_lists: &[(VideoEncoderBackend, Vec<RtcCodec>)],
+    software: &[RtcCodec],
+) -> Vec<Framework> {
+    let decodable = |c: VideoCodec| host.get(c).map(|x| x.decode).unwrap_or(false);
+    let mut out: Vec<Framework> = Vec::new();
+    for (backend, list) in hw_lists {
+        let encodes: Vec<VideoCodec> = ALL_CODECS
+            .iter()
+            .copied()
+            .filter(|c| list.iter().any(|r| same_codec(*r, *c)))
+            .collect();
+        // Hardware decoders the SDK wires up, from its source: VideoToolbox on
+        // Apple platforms, NVDEC alongside NVENC. VAAPI and Jetson encode only.
+        let (decodes, basis) = match backend {
+            VideoEncoderBackend::VideoToolbox | VideoEncoderBackend::Nvenc => (
+                [VideoCodec::H264, VideoCodec::H265]
+                    .into_iter()
+                    .filter(|c| decodable(*c))
+                    .collect(),
+                "from the SDK source",
+            ),
+            _ => (Vec::new(), "encode only in this SDK"),
+        };
+        let name = match backend {
+            VideoEncoderBackend::Nvenc => "NVIDIA NVENC / NVDEC".to_string(),
+            b => backend_name(*b).to_string(),
+        };
+        out.push(Framework {
+            name,
+            hardware: true,
+            encodes,
+            decodes,
+            decode_basis: basis,
+        });
+    }
+    let sw = |c: VideoCodec| software.iter().any(|r| same_codec(*r, c));
+    let mut sw_frameworks = Vec::new();
+    for (name, codecs, decoder) in [
+        ("libvpx", &[VideoCodec::VP8, VideoCodec::VP9][..], true),
+        (
+            "libaom (encode) · dav1d (decode)",
+            &[VideoCodec::AV1][..],
+            true,
+        ),
+        ("OpenH264", &[VideoCodec::H264][..], false),
+    ] {
+        let encodes: Vec<VideoCodec> = codecs.iter().copied().filter(|c| sw(*c)).collect();
+        let decodes: Vec<VideoCodec> = if decoder {
+            codecs
+                .iter()
+                .copied()
+                .filter(|c| decodable(*c) && !out.iter().any(|f| f.decodes.contains(c)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if !encodes.is_empty() || !decodes.is_empty() {
+            sw_frameworks.push(Framework {
+                name: name.to_string(),
+                hardware: false,
+                encodes,
+                decodes,
+                decode_basis: if decoder {
+                    "from the SDK source"
+                } else {
+                    "encode only"
+                },
+            });
+        }
+    }
+    out.extend(sw_frameworks);
+    out
+}
+
+/// Hardware the machine has but this build cannot use, and platform notes.
+fn platform_hints(host: &HostCaps) -> Vec<String> {
+    let mut hints = Vec::new();
+    let has = |b: VideoEncoderBackend| host.backends.contains(&b);
+    if cfg!(target_os = "linux") {
+        if std::path::Path::new("/proc/driver/nvidia/version").exists()
+            && !has(VideoEncoderBackend::Nvenc)
+        {
+            hints.push("An NVIDIA GPU and driver are present, but this build has no NVENC/NVDEC: it was built without the CUDA toolkit. Install it (or set CUDA_HOME) and rebuild.".into());
+        }
+        if cfg!(target_arch = "x86_64")
+            && std::path::Path::new("/dev/dri/renderD128").exists()
+            && !has(VideoEncoderBackend::Vaapi)
+        {
+            hints.push("A GPU render node is present, but VAAPI is not in use: the build had no libva-dev, or the VAAPI driver is missing (intel-media-va-driver or mesa-va-drivers).".into());
+        }
+    }
+    if cfg!(target_os = "windows") {
+        hints.push("This SDK build has no hardware video on Windows: encoding and decoding are software only.".into());
+    }
+    for c in &host.codecs {
+        if c.can_encode() && !c.decode {
+            hints.push(format!(
+                "{} can be sent but not received by this app: the SDK has no software decoder for it and no hardware one is in use. Browsers can receive it.",
+                codec_name(c.codec)
+            ));
+        }
+    }
+    hints
 }
 
 /// Print what the SDK reports per backend, for `--caps` and bug reports.
@@ -354,6 +565,26 @@ mod tests {
     }
 
     #[test]
+    fn profile_names() {
+        let h = |f: &str| profile_label(VideoCodec::H264, f);
+        assert_eq!(
+            h("level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"),
+            "Constrained Baseline 3.1"
+        );
+        assert_eq!(h("profile-level-id=640c34"), "Constrained High 5.2");
+        assert_eq!(h("profile-level-id=4d001f"), "Main 3.1");
+        assert_eq!(
+            profile_label(VideoCodec::H265, "level-id=180;profile-id=2;tier-flag=0"),
+            "Main 10"
+        );
+        assert_eq!(profile_label(VideoCodec::VP9, "profile-id=2"), "profile 2");
+        assert_eq!(
+            profile_label(VideoCodec::AV1, "level-idx=5;profile=0;tier=0"),
+            "Main"
+        );
+    }
+
+    #[test]
     fn encoder_rules() {
         let host = HostCaps {
             codecs: vec![
@@ -362,6 +593,10 @@ mod tests {
             ],
             backends: vec![],
             decoder_mimes: vec![],
+            send_profiles: vec![],
+            recv_profiles: vec![],
+            frameworks: vec![],
+            hints: vec![],
         };
         assert!(host
             .encoder_allowed(VideoCodec::H265, EncoderChoice::Hardware)

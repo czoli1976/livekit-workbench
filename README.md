@@ -2,6 +2,8 @@
 
 A desktop app for seeing what really happens to video in [LiveKit](https://livekit.io): pick a codec, an encoder (hardware or software), simulcast or SVC, a bitrate cap, and watch every stage of the pipeline, from capture through encode, send and the SFU to the decoder at the far end, with the numbers WebRTC itself reports.
 
+![Workbench for LiveKit publishing H.264 through a local server: previews on top, pipeline cards outlined green](docs/screenshot.png)
+
 Built in Rust with the [LiveKit Rust SDK](https://github.com/livekit/rust-sdks) and [egui](https://github.com/emilk/egui). Runs on macOS, Windows and Linux.
 
 ## What it does
@@ -11,7 +13,9 @@ Built in Rust with the [LiveKit Rust SDK](https://github.com/livekit/rust-sdks) 
 - **Shows what applies live and what needs a republish.** The stock SDK keeps a published track's sender private, so changing the codec, bitrate cap or encoder republishes the track (about 1 s without video). Switching the input and choosing the subscriber's layer apply at once.
 - **Pipeline cards with health outlines.** Capture, encode, send, SFU and receive each get a green, amber or red outline. Hover a card for the reason (CPU-limited encoder, still ramping, packet loss, freezes…).
 - **Stats & Telemetry window.** Per-layer target vs actual resolution, frame rate and bitrate; encoder implementation; why WebRTC degraded (bandwidth, CPU); one row per subscriber, including browser viewers; transport; an event log; CSV recording; and a reference table of what the Rust SDK sends to the server.
-- **Ask optimal resolution.** The app, and optionally browser viewers, tell the SFU the size of the tile the video is shown in. The SFU then forwards the smallest simulcast or SVC layer that fills it, at most every 5 s and only when the size changes.
+- **Choose what the subscriber asks the SFU for.** Top layer, half or quarter size, or the size of the far-end tile; the SFU forwards the smallest simulcast or SVC layer that covers it. Browser viewers can do the same with the LiveKit JS SDK's adaptive stream.
+- **Host capabilities.** Codecs per encoder and decoder framework (VideoToolbox, NVENC/NVDEC, VAAPI, libvpx, libaom, dav1d, OpenH264), the profiles WebRTC offers, what this session actually used, and hardware the build cannot use.
+- **Collapsible settings panel.** Click the handle beside it to give the video and pipeline the full width.
 - **Browser viewer.** One click opens a page that joins the room, plays the video and reports its decoder stats back to the app.
 - **Local dev server, managed for you.** With the *Local dev* profile the app starts `livekit-server` itself and shows its CPU, memory, rooms, traffic and log. LiveKit Cloud and self-hosted servers work through profiles; API secrets live in the system credential store (macOS Keychain, Windows Credential Manager, Secret Service on Linux).
 

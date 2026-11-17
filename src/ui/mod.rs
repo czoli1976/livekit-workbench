@@ -74,6 +74,16 @@ pub struct App {
     stats_ui: StatsUi,
     notice: Option<(String, Instant)>,
     autoconnect_pending: bool,
+    /// Encoders and decoders WebRTC reported this session, per codec line.
+    seen: std::collections::BTreeMap<
+        String,
+        (
+            std::collections::BTreeSet<String>,
+            std::collections::BTreeSet<String>,
+        ),
+    >,
+    /// The left settings panel is open.
+    settings_open: bool,
     /// Browser viewers ask the SFU for a layer that fits their video element.
     browser_adaptive: bool,
 }
@@ -132,6 +142,8 @@ impl App {
             stats_ui: StatsUi::default(),
             notice: None,
             browser_adaptive: false,
+            seen: Default::default(),
+            settings_open: true,
             autoconnect_pending: std::env::var_os("WB_AUTOCONNECT").is_some(),
             rt,
         };
@@ -145,6 +157,7 @@ impl App {
                     "profiles" => app.show_profiles = true,
                     "about" => app.show_about = true,
                     "far" => app.remote_undocked = true,
+                    "nosettings" => app.settings_open = false,
                     "local" => app.local_undocked = true,
                     _ => {}
                 }
@@ -667,6 +680,40 @@ impl App {
     }
 }
 
+impl App {
+    /// Remember which encoder and decoder WebRTC used for each codec line.
+    fn note_seen(&mut self) {
+        let snap = self.session.shared.lock().snapshot.clone();
+        for l in snap
+            .layers
+            .iter()
+            .filter(|l| !l.codec.is_empty() && !l.encoder.is_empty())
+        {
+            let hw = if l.hardware { "HW" } else { "SW" };
+            self.seen
+                .entry(l.codec.clone())
+                .or_default()
+                .0
+                .insert(format!("{} ({hw})", l.encoder));
+        }
+        if let Some(r) = snap
+            .self_receive()
+            .filter(|r| !r.codec.is_empty() && !r.decoder.is_empty())
+        {
+            let hw = match r.hardware {
+                Some(true) => " (HW)",
+                Some(false) => " (SW)",
+                None => "",
+            };
+            self.seen
+                .entry(r.codec.clone())
+                .or_default()
+                .1
+                .insert(format!("{}{hw}", r.decoder));
+        }
+    }
+}
+
 /// Whether the main window is in full-screen mode (always asked of the root).
 fn main_is_fullscreen(ctx: &egui::Context) -> bool {
     ctx.input_for(egui::ViewportId::ROOT, |i| {
@@ -697,14 +744,49 @@ impl eframe::App for App {
             .show(ui, |ui| {
                 self.status_line(ui);
             });
+        self.note_seen();
+        // A handle strip next to the settings panel opens and closes it.
+        let mut open = self.settings_open;
         egui::Panel::left("settings")
             .frame(theme::sidebar_frame())
             .default_size(400.0)
             .resizable(true)
-            .show(ui, |ui| {
+            .show_collapsible(ui, &mut open, |ui| {
                 egui::ScrollArea::vertical()
                     .auto_shrink(false)
                     .show(ui, |ui| self.settings_ui(ui));
+            });
+        self.settings_open = open;
+        egui::Panel::left("settings-handle")
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::SIDEBAR)
+                    .stroke(egui::Stroke::new(1.0, theme::BORDER)),
+            )
+            .exact_size(18.0)
+            .resizable(false)
+            .show(ui, |ui| {
+                let (rect, resp) =
+                    ui.allocate_exact_size(ui.available_size(), egui::Sense::click());
+                let hovered = resp.hovered();
+                if hovered {
+                    ui.painter().rect_filled(rect, 0.0, theme::HOVER);
+                }
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    if self.settings_open { "‹" } else { "›" },
+                    egui::FontId::proportional(18.0),
+                    if hovered { theme::TEXT } else { theme::MUTED },
+                );
+                let resp = resp.on_hover_text(if self.settings_open {
+                    "Hide settings"
+                } else {
+                    "Show settings"
+                });
+                if resp.clicked() {
+                    self.settings_open = !self.settings_open;
+                }
             });
         egui::CentralPanel::default_margins()
             .frame(theme::central_frame())
