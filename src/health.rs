@@ -58,6 +58,9 @@ pub struct HealthInput {
 
     pub target_fps: f64,
     pub capture_fps: f64,
+    /// Screen capture: macOS sends a new frame only when the screen changes,
+    /// so a rate under target is normal.
+    pub screen: bool,
     pub seconds_since_capture_frame: f64,
 
     pub encode_fps: f64,
@@ -130,6 +133,15 @@ fn capture(i: &HealthInput) -> Verdict {
         return Verdict::new(Health::Failing, "No frames for 2 s");
     }
     let r = ratio(i.capture_fps, i.target_fps);
+    if i.screen {
+        return Verdict::new(
+            Health::Good,
+            format!(
+                "{:.0}% of target frame rate; a screen sends frames only when it changes",
+                r * 100.0
+            ),
+        );
+    }
     if r >= 0.95 {
         Verdict::new(Health::Good, "At target frame rate")
     } else if r >= 0.70 {

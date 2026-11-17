@@ -215,10 +215,14 @@ fn run_screen(
         )
     };
 
-    let (tx, rx) = sync_channel::<std::result::Result<I420Buffer, String>>(2);
+    // Each frame with the screen's own size, before scaling.
+    let (tx, rx) = sync_channel::<std::result::Result<(I420Buffer, (u32, u32)), String>>(2);
     capturer.start_capture(source, move |result| {
         let msg = match result {
-            Ok(frame) => Ok(desktop_to_i420(&frame, width, height)),
+            Ok(frame) => Ok((
+                desktop_to_i420(&frame, width, height),
+                (frame.width() as u32, frame.height() as u32),
+            )),
             Err(livekit::webrtc::desktop_capturer::CaptureError::Temporary) => return,
             Err(e) => Err(format!("{e:?}")),
         };
@@ -234,12 +238,17 @@ fn run_screen(
         capturer.capture_frame();
         loop {
             match rx.try_recv() {
-                Ok(Ok(buf)) => {
+                Ok(Ok((buf, (nw, nh)))) => {
                     if let Some(f) = on_info.take() {
+                        let note = if (nw, nh) == (buf.width(), buf.height()) {
+                            format!("screen at its own size {nw}×{nh}")
+                        } else {
+                            format!("screen {nw}×{nh}, scaled to fit {width}×{height}")
+                        };
                         f(CaptureInfo {
                             width: buf.width(),
                             height: buf.height(),
-                            note: "screen".into(),
+                            note,
                         });
                     }
                     last_frame = Some(Instant::now());

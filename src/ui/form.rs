@@ -61,7 +61,9 @@ pub struct PublishForm {
     pub audio: AudioConfig,
 }
 
-const AUDIO_BITRATES: [u64; 6] = [16_000, 24_000, 32_000, 48_000, 64_000, 128_000];
+/// Opus's bitrate range.
+const OPUS_MIN_KBPS: u32 = 6;
+const OPUS_MAX_KBPS: u32 = 510;
 
 impl Default for PublishForm {
     fn default() -> Self {
@@ -270,12 +272,8 @@ impl App {
                             .on_hover_text("A moving pattern plus fresh grain every frame: needs a realistic bitrate, like a camera.");
                         ui.selectable_value(&mut self.form.source, SourceKind::Pattern, "Synthetic: moving pattern")
                             .on_hover_text("A scrolling texture: cheap to encode, needs little bitrate.");
-                        ui.selectable_value(&mut self.form.source, SourceKind::Screen, "Screen")
-                            .on_hover_text(if cfg!(target_os = "macos") {
-                                "A display or window, chosen in macOS's picker when capture starts (at Connect or Publish)."
-                            } else {
-                                "The main screen; on Linux with Wayland, the desktop picker asks which."
-                            });
+// Screen sharing is hidden for now (it confused more than it helped);
+                        // the engine still supports it, headless: --source screen.
                         for c in self.cameras.clone() {
                             ui.selectable_value(&mut self.form.source, SourceKind::Camera(c.index), c.name);
                         }
@@ -288,8 +286,10 @@ impl App {
             });
             ui.separator();
             ui.horizontal(|ui| {
+                let screen = self.form.source == SourceKind::Screen;
                 let summary = format!(
-                    "{}×{} · {} fps · {} · {}",
+                    "{}{}×{} · {} fps · {} · {}",
+                    if screen { "max " } else { "" },
                     self.form.capture.0,
                     self.form.capture.1,
                     self.form.fps,
@@ -304,6 +304,16 @@ impl App {
                     }
                 });
             });
+            // What is really captured, which differs from the setting for a
+            // screen (scaled to fit, keeping its shape) or a capped camera.
+            let cap = self.session.shared.lock().snapshot.capture.clone();
+            if cap.width > 0 && (cap.width, cap.height) != self.form.capture {
+                ui.label(
+                    RichText::new(format!("Capturing {}×{}: {}", cap.width, cap.height, cap.note))
+                        .small()
+                        .color(super::theme::ACCENT_TEXT),
+                );
+            }
             if self.video_opts_open {
                 self.video_options(ui);
             }
@@ -316,7 +326,13 @@ impl App {
     fn video_options(&mut self, ui: &mut egui::Ui) {
         egui::Grid::new("source-grid").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label("Capture");
+                if self.form.source == SourceKind::Screen {
+                    ui.label("Max size").on_hover_text(
+                        "The screen is scaled down to fit inside this size, keeping its shape. A Retina screen is larger than 1080p: pick 4K or 5K to send it sharp.",
+                    );
+                } else {
+                    ui.label("Capture");
+                }
                 live_badge(ui);
             });
             match self.form.source.clone() {
@@ -876,13 +892,14 @@ impl App {
             .spacing([8.0, 4.0])
             .show(ui, |ui| {
                 ui.label("Opus bitrate");
-                egui::ComboBox::from_id_salt("audio-bitrate")
-                    .selected_text(format!("{} kbps", a.bitrate_bps / 1000))
-                    .show_ui(ui, |ui| {
-                        for b in AUDIO_BITRATES {
-                            ui.selectable_value(&mut a.bitrate_bps, b, format!("{} kbps", b / 1000));
-                        }
-                    });
+                let mut kbps = (a.bitrate_bps / 1000) as u32;
+                ui.add(
+                    egui::Slider::new(&mut kbps, OPUS_MIN_KBPS..=OPUS_MAX_KBPS)
+                        .logarithmic(true)
+                        .suffix(" kbps"),
+                )
+                .on_hover_text("Opus runs from 6 to 510 kbps. LiveKit's presets: 12 telephone, 24 speech, 48 music, 64 stereo music, 96 and 128 high quality. In mono WebRTC's Opus stops rising at about 200 kbps.");
+                a.bitrate_bps = kbps as u64 * 1000;
                 ui.end_row();
                 ui.label("Resilience");
                 ui.horizontal(|ui| {

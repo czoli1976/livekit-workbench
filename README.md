@@ -19,7 +19,7 @@ Built in Rust with the [LiveKit Rust SDK](https://github.com/livekit/rust-sdks) 
 - **Stats & Telemetry window.** Per-layer target vs actual resolution, frame rate and bitrate; encoder implementation; why WebRTC degraded (bandwidth, CPU); one row per subscriber, including browser viewers; transport; an event log; CSV recording; and a reference table of what the Rust SDK sends to the server.
 - **Choose what the subscriber asks the SFU for.** Top layer, half or quarter size, or the size of the far-end tile; the SFU forwards the smallest simulcast or SVC layer that covers it. Browser viewers can do the same with the LiveKit JS SDK's adaptive stream.
 - **Host capabilities.** Codecs per encoder and decoder framework (VideoToolbox, NVENC/NVDEC, VAAPI, libvpx, libaom, dav1d, OpenH264), the profiles WebRTC offers, what this session actually used, and hardware the build cannot use.
-- **Camera, synthetic video or screen**, shown in the local preview before you connect.
+- **Camera or synthetic video**, shown in the local preview before you connect.
 - **Audio too.** Publish a synthetic tone or a microphone, with Opus bitrate, DTX and RED. Loss, jitter, jitter buffer and concealment are shown for both directions.
 - **Network impairment without admin rights.** An in-app TURN relay adds loss, delay, jitter and a rate cap to the publisher's uplink and the subscriber's downlink, live, on any OS and with any server.
 - **End-to-end encryption** with a shared passphrase, including in browser viewers.

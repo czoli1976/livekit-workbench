@@ -213,6 +213,10 @@ pub struct Preview {
     pub rgba: Vec<u8>,
     pub seq: u64,
     pub on_update: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Width in pixels the UI draws this preview at (0: not drawn yet).
+    /// Frames are scaled to it, up to the frame's own width, so an undocked
+    /// preview is as sharp as the frame itself.
+    pub want_w: u32,
 }
 
 pub type SharedPreview = Arc<Mutex<Preview>>;
@@ -1658,6 +1662,7 @@ impl Engine {
                     subscribed: me.is_some(),
                     target_fps: p.cfg.fps.min(p.cfg.max_fps) as f64,
                     capture_fps: snap.capture.fps,
+                    screen: p.cfg.source == SourceKind::Screen,
                     seconds_since_capture_frame: p.last_frame.lock().elapsed().as_secs_f64(),
                     encode_fps: top.as_ref().map(|t| t.fps).unwrap_or(0.0),
                     encode_ms_per_frame: top.as_ref().map(|t| t.encode_ms).unwrap_or(0.0),
@@ -2133,7 +2138,13 @@ fn write_preview(slot: &SharedPreview, buf: &mut I420Buffer) {
     if w < 2 || h < 2 {
         return;
     }
-    let pw = PREVIEW_MAX_W.min(w) & !1;
+    let want = slot.lock().want_w;
+    let target = if want == 0 {
+        PREVIEW_MAX_W
+    } else {
+        want.max(160)
+    };
+    let pw = target.min(w) & !1;
     let ph = (((h as u64 * pw as u64) / w as u64) as u32).max(2) & !1;
     let small = buf.scale(pw as i32, ph as i32);
     let (sy, su, sv) = small.strides();

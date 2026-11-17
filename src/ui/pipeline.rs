@@ -65,7 +65,9 @@ impl PreviewPane {
         placeholder: &str,
     ) -> egui::Rect {
         {
-            let p = slot.lock();
+            let mut p = slot.lock();
+            // Ask for frames as wide as the pixels this pane covers.
+            p.want_w = (size.x * ui.ctx().pixels_per_point()).round() as u32;
             if p.seq != self.seen {
                 self.seen = p.seq;
                 if p.w > 0 && p.rgba.len() == p.w * p.h * 4 {
