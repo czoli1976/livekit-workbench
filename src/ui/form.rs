@@ -9,6 +9,15 @@ use crate::capabilities::{codec_name, codec_supports_svc, EncoderChoice, ALL_COD
 use crate::capture::SourceKind;
 use crate::session::{Layering, Phase, PublishConfig};
 
+/// What "Detail (screencast)" changes, read from WebRTC m150 and LiveKit's
+/// fork of it (the SDK sets the source's screencast flag).
+const CONTENT_HINT_HELP: &str = "Marks the source as screen content. What that changes:\n\
+• When constrained = Balanced becomes Keep resolution: WebRTC drops frames instead of lowering the size.\n\
+• VideoToolbox (H.264, H.265): QP capped at 39, and H.264 uses the Baseline profile at an automatic level.\n\
+• OpenH264: switches to its screen-content mode.\n\
+• All encoders: frames are labelled as screen share for receivers, and the bitrate cap is raised to at least 1.2 Mbps.\n\
+NVENC, VAAPI and Jetson encoders ignore it beyond the WebRTC-level changes.";
+
 pub const SIZES: &[(&str, u32, u32)] = &[
     ("360p", 640, 360),
     ("540p", 960, 540),
@@ -323,7 +332,7 @@ impl App {
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.form.detail_hint, false, "Motion (camera)");
                     ui.selectable_value(&mut self.form.detail_hint, true, "Detail (screencast)")
-                        .on_hover_text("WebRTC treats the source as a screencast: it keeps detail and drops frames first.");
+                        .on_hover_text(CONTENT_HINT_HELP);
                 });
             ui.end_row();
         });

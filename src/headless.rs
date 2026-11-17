@@ -10,6 +10,7 @@
 //!     --source detail|pattern          (default detail)
 //!     --seconds N                      (default 10)
 //!     --ask WxH                        ask the SFU for a layer that fits a WxH tile
+//!     --detail-hint                    content hint Detail (screencast)
 //!     --lifecycle                      also exercise unpublish, publish, republish, switch source
 //!
 //! Connects with LIVEKIT_URL, LIVEKIT_API_KEY and LIVEKIT_API_SECRET, or the
@@ -179,7 +180,7 @@ pub fn run(args: &[String]) -> i32 {
         degradation: DegradationPreference::Balanced,
         layering,
         screen_share: false,
-        detail_hint: false,
+        detail_hint: args.iter().any(|a| a == "--detail-hint"),
     };
     let room = format!("headless-{}", std::process::id());
     println!(
