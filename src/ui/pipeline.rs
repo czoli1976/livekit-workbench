@@ -241,7 +241,7 @@ impl App {
                 }
                 ui.label(
                     RichText::new(format!(
-                        "{name} impaired: {} % loss, {} ms ± {} ms, {} · passing {:.0} kbps, dropped {:.1} % random + {:.1} % queue, queue {:.0} ms",
+                        "{name} impaired: {} % loss, {} ms delay + 0–{} ms jitter, {} · passing {:.0} kbps, dropped {:.1} % random + {:.1} % queue, queue {:.0} ms",
                         s.loss_pct,
                         s.delay_ms,
                         s.jitter_ms,
