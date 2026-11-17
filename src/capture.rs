@@ -183,11 +183,12 @@ fn run_screen(
     use livekit::webrtc::video_frame::VideoBuffer;
     use std::sync::mpsc::{sync_channel, TryRecvError};
 
-    // macOS: ScreenCaptureKit's own picker chooses the display or window.
+    // macOS: ScreenCaptureKit's own picker chooses the display or window (the
+    // generic capturer; the screen capturer's picker offers displays only).
     // Linux on Wayland: the desktop portal picker. Otherwise: the first screen.
     let wayland = cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some();
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    let kind = if wayland {
+    let kind = if wayland || cfg!(target_os = "macos") {
         DesktopCaptureSourceType::Generic
     } else {
         DesktopCaptureSourceType::Screen

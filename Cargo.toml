@@ -39,6 +39,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 nokhwa = { git = "https://github.com/l1npengtul/nokhwa", rev = "4923ecab7cf26f9dba83867a15a9d8662d021296", default-features = false, features = ["input-avfoundation", "output-threaded"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# Screen capture on Wayland talks to the desktop portal over a GLib main loop.
+livekit = { version = "0.11", features = ["rustls-tls-native-roots", "glib-main-loop"] }
 nokhwa = { git = "https://github.com/l1npengtul/nokhwa", rev = "4923ecab7cf26f9dba83867a15a9d8662d021296", default-features = false, features = ["input-v4l", "output-threaded"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]

@@ -11,6 +11,7 @@
 //!     --seconds N                      (default 10)
 //!     --ask WxH                        ask the SFU for a layer that fits a WxH tile
 //!     --e2ee PASSPHRASE                end-to-end encryption with a shared key
+//!                                      (or LIVEKIT_E2EE_KEY, kept out of process listings)
 //!     --detail-hint                    content hint Detail / text (screencast flag)
 //!     --audio tone|MICROPHONE-NAME     also publish audio, and require it to arrive
 //!     --audio-kbps N                   Opus bitrate cap (default 32)
@@ -219,7 +220,7 @@ pub fn run(args: &[String]) -> i32 {
             "{}",
             include_str!("headless.rs")
                 .lines()
-                .take(17)
+                .take_while(|l| l.starts_with("//!"))
                 .map(|l| l.trim_start_matches("//!"))
                 .collect::<Vec<_>>()
                 .join("\n")
@@ -307,6 +308,12 @@ pub fn run(args: &[String]) -> i32 {
             ..Default::default()
         },
     };
+    // The passphrase: LIVEKIT_E2EE_KEY keeps it out of process listings and
+    // shell history; --e2ee still works for quick tests.
+    let e2ee_key = std::env::var("LIVEKIT_E2EE_KEY")
+        .ok()
+        .or_else(|| opt(args, "--e2ee").map(str::to_string))
+        .filter(|k| !k.is_empty());
     let room = format!("headless-{}", std::process::id());
     println!(
         "{} · room {room} · {url}",
@@ -319,7 +326,7 @@ pub fn run(args: &[String]) -> i32 {
             crate::session::viewer_token(&key, &secret, &room, "browser-1"),
         ) {
             (Ok(v), Ok(tok)) => {
-                println!("viewer: {}", v.link(&url, &tok, true, opt(args, "--e2ee")));
+                println!("viewer: {}", v.link(&url, &tok, true, e2ee_key.as_deref()));
                 Some(v)
             }
             _ => None,
@@ -339,7 +346,7 @@ pub fn run(args: &[String]) -> i32 {
             room,
             decode: true,
             preview: false,
-            e2ee_key: opt(args, "--e2ee").map(str::to_string),
+            e2ee_key: e2ee_key.clone(),
         },
         Some(publish.clone()),
     );
