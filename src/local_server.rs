@@ -36,6 +36,35 @@ pub struct LogLine {
     pub text: String,
 }
 
+/// One server-side histogram: the latest report and the session average.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HistValue {
+    /// Average of the observations added since the previous poll that had any.
+    pub last: Option<f64>,
+    /// Average since the server started.
+    pub avg: Option<f64>,
+    /// When `last` was reported.
+    pub at: Option<Instant>,
+}
+
+/// What the SFU measured for one direction and media kind.
+#[derive(Clone, Debug, Default)]
+pub struct SfuRow {
+    pub label: &'static str,
+    pub loss_pct: HistValue,
+    pub jitter_ms: HistValue,
+    pub rtt_ms: HistValue,
+    pub out_of_order_pct: HistValue,
+}
+
+/// (direction label value, media type, row label)
+const SFU_ROWS: [(&str, &str, &str); 4] = [
+    ("incoming", "VIDEO", "Video · publisher → SFU"),
+    ("outgoing", "VIDEO", "Video · SFU → subscriber"),
+    ("incoming", "AUDIO", "Audio · publisher → SFU"),
+    ("outgoing", "AUDIO", "Audio · SFU → subscriber"),
+];
+
 #[derive(Clone, Debug, Default)]
 pub struct ServerStats {
     pub version: String,
@@ -56,6 +85,12 @@ pub struct ServerStats {
     pub fec_discarded: Option<u64>,
     /// NACKs since the server started.
     pub nack_total: Option<u64>,
+    /// The SFU's own loss, jitter, RTT and reordering per direction, from its
+    /// Prometheus histograms. Rows appear once the server has reported them.
+    pub sfu: Vec<SfuRow>,
+    /// The server's connection quality score (1 to 5) across all participants.
+    pub quality_score: HistValue,
+    pub forward_latency_ms: HistValue,
     pub room_names: Vec<String>,
     pub participant_names: Vec<String>,
     pub warnings: u64,
@@ -69,6 +104,96 @@ struct Inner {
     stats: ServerStats,
     child: Option<Child>,
     prev_metrics: Option<(Instant, HashMap<String, f64>)>,
+    hist: HashMap<String, HistState>,
+    counters: HashMap<String, CounterState>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CounterState {
+    value: f64,
+    changed_at: Instant,
+    rate: Option<f64>,
+}
+
+/// Per-second rate of a counter the server only updates every few seconds:
+/// measured from one update to the next, held until the next one, and zero
+/// once nothing has changed for a while.
+fn counter_rate(
+    counters: &mut HashMap<String, CounterState>,
+    m: &HashMap<String, f64>,
+    key: &str,
+    now: Instant,
+) -> Option<f64> {
+    let v = *m.get(key)?;
+    let st = counters.entry(key.to_string()).or_insert(CounterState {
+        value: v,
+        changed_at: now,
+        rate: None,
+    });
+    if v < st.value {
+        *st = CounterState {
+            value: v,
+            changed_at: now,
+            rate: None,
+        };
+    } else if v > st.value {
+        let dt = now.duration_since(st.changed_at).as_secs_f64().max(0.1);
+        st.rate = Some((v - st.value) / dt);
+        st.value = v;
+        st.changed_at = now;
+    } else if now.duration_since(st.changed_at) > Duration::from_secs(15) {
+        st.rate = Some(0.0);
+    }
+    st.rate
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct HistState {
+    sum: f64,
+    count: f64,
+    last: Option<f64>,
+    at: Option<Instant>,
+}
+
+/// Update one histogram from a metrics poll: `name` plus a label suffix as
+/// `parse_prometheus` keys it ("" or "|incoming#VIDEO"), scaled by `scale`.
+fn observe(
+    hist: &mut HashMap<String, HistState>,
+    m: &HashMap<String, f64>,
+    name: &str,
+    suffix: &str,
+    scale: f64,
+    now: Instant,
+) -> HistValue {
+    let (Some(&sum), Some(&count)) = (
+        m.get(&format!("{name}_sum{suffix}")),
+        m.get(&format!("{name}_count{suffix}")),
+    ) else {
+        return HistValue::default();
+    };
+    if count
+        < hist
+            .get(&format!("{name}{suffix}"))
+            .map_or(0.0, |h| h.count)
+    {
+        // The server restarted.
+        hist.remove(&format!("{name}{suffix}"));
+    }
+    let st = hist.entry(format!("{name}{suffix}")).or_default();
+    if count > st.count && st.count > 0.0 {
+        st.last = Some((sum - st.sum) / (count - st.count) * scale);
+        st.at = Some(now);
+    } else if count > 0.0 && st.last.is_none() {
+        st.last = Some(sum / count * scale);
+        st.at = Some(now);
+    }
+    st.sum = sum;
+    st.count = count;
+    HistValue {
+        last: st.last,
+        avg: (count > 0.0).then(|| sum / count * scale),
+        at: st.at,
+    }
 }
 
 /// Handle to the local server. Cheap to clone.
@@ -473,17 +598,40 @@ impl LocalServer {
                 Some(((a - b) / dt).max(0.0))
             };
             inner.stats.cpu_percent = rate("process_cpu_seconds_total").map(|r| r * 100.0);
-            inner.stats.packets_in_per_s = rate("livekit_packet_total|incoming");
-            inner.stats.packets_out_per_s = rate("livekit_packet_total|outgoing");
-            inner.stats.mbps_in = rate("livekit_packet_bytes|incoming").map(|b| b * 8.0 / 1e6);
-            inner.stats.mbps_out = rate("livekit_packet_bytes|outgoing").map(|b| b * 8.0 / 1e6);
-            inner.stats.nack_per_s = rate("livekit_nack_total");
         }
+        // The server batches these counters every few seconds.
+        let c = &mut inner.counters;
+        inner.stats.packets_in_per_s = counter_rate(c, m, "livekit_packet_total|incoming", now);
+        inner.stats.packets_out_per_s = counter_rate(c, m, "livekit_packet_total|outgoing", now);
+        inner.stats.mbps_in =
+            counter_rate(c, m, "livekit_packet_bytes|incoming", now).map(|b| b * 8.0 / 1e6);
+        inner.stats.mbps_out =
+            counter_rate(c, m, "livekit_packet_bytes|outgoing", now).map(|b| b * 8.0 / 1e6);
+        inner.stats.nack_per_s = counter_rate(c, m, "livekit_nack_total", now);
         let total = |k: &str| m.get(k).map(|v| *v as u64);
         inner.stats.fec_received = total("livekit_fec_total#received");
         inner.stats.fec_recovered = total("livekit_fec_total#recovered");
         inner.stats.fec_discarded = total("livekit_fec_total#discarded");
         inner.stats.nack_total = total("livekit_nack_total");
+        let hist = &mut inner.hist;
+        inner.stats.sfu = SFU_ROWS
+            .iter()
+            .map(|(dir, kind, label)| {
+                let suffix = format!("|{dir}#{kind}");
+                let mut o = |name: &str, scale: f64| observe(hist, m, name, &suffix, scale, now);
+                SfuRow {
+                    label,
+                    loss_pct: o("livekit_packet_loss_percent", 1.0),
+                    jitter_ms: o("livekit_jitter_us", 0.001),
+                    rtt_ms: o("livekit_rtt_ms", 1.0),
+                    out_of_order_pct: o("livekit_packet_out_of_order_percent", 1.0),
+                }
+            })
+            .filter(|r| r.loss_pct.avg.is_some() || r.rtt_ms.avg.is_some())
+            .collect();
+        inner.stats.quality_score = observe(hist, m, "livekit_quality_score", "", 1.0, now);
+        inner.stats.forward_latency_ms =
+            observe(hist, m, "livekit_forward_latency_ns", "", 1e-6, now);
         inner.prev_metrics = Some((now, m.clone()));
     }
 }
@@ -574,6 +722,16 @@ pub fn parse_prometheus(text: &str) -> HashMap<String, f64> {
                 *out.entry(format!("{name}#{kind}")).or_default() += value;
             }
         }
+        // Direction and type together, for per-direction histograms by media kind.
+        let find = |key: &str| {
+            labels
+                .split(',')
+                .find_map(|l| l.trim().strip_prefix(key))
+                .map(|v| v.trim_end_matches('"').to_string())
+        };
+        if let (Some(dir), Some(kind)) = (find("direction=\""), find("type=\"")) {
+            *out.entry(format!("{name}|{dir}#{kind}")).or_default() += value;
+        }
     }
     out
 }
@@ -595,6 +753,86 @@ mod tests {
         assert_eq!(m["livekit_packet_total|incoming"], 15.0);
         assert_eq!(m["livekit_packet_total|outgoing"], 7.0);
         assert_eq!(m["livekit_room_total"], 1.0);
+    }
+
+    #[test]
+    fn histogram_last_report_and_average() {
+        let t0 = Instant::now();
+        let mut hist = HashMap::new();
+        let poll = |text: &str| parse_prometheus(text);
+        let line = |sum: f64, count: f64| {
+            format!(
+                "livekit_rtt_ms_sum{{direction=\"incoming\",source=\"CAMERA\",type=\"VIDEO\"}} {sum}\n\
+                 livekit_rtt_ms_count{{direction=\"incoming\",source=\"CAMERA\",type=\"VIDEO\"}} {count}\n\
+                 livekit_rtt_ms_count{{direction=\"outgoing\",source=\"CAMERA\",type=\"VIDEO\"}} 9\n"
+            )
+        };
+        let k = "|incoming#VIDEO";
+        let v = observe(
+            &mut hist,
+            &poll(&line(20.0, 2.0)),
+            "livekit_rtt_ms",
+            k,
+            1.0,
+            t0,
+        );
+        assert_eq!((v.last, v.avg), (Some(10.0), Some(10.0)));
+        // Two new reports of 40 ms each: last 40, average 100 / 4.
+        let t1 = t0 + Duration::from_secs(10);
+        let v = observe(
+            &mut hist,
+            &poll(&line(100.0, 4.0)),
+            "livekit_rtt_ms",
+            k,
+            1.0,
+            t1,
+        );
+        assert_eq!((v.last, v.avg, v.at), (Some(40.0), Some(25.0), Some(t1)));
+        // No new report: the last one and its time stay.
+        let v = observe(
+            &mut hist,
+            &poll(&line(100.0, 4.0)),
+            "livekit_rtt_ms",
+            k,
+            1.0,
+            t1 + Duration::from_secs(1),
+        );
+        assert_eq!((v.last, v.at), (Some(40.0), Some(t1)));
+        // Nothing for audio.
+        let v = observe(
+            &mut hist,
+            &poll(&line(1.0, 1.0)),
+            "livekit_rtt_ms",
+            "|incoming#AUDIO",
+            1.0,
+            t1,
+        );
+        assert_eq!(v, HistValue::default());
+    }
+
+    #[test]
+    fn batched_counter_rate_holds_between_updates() {
+        let t0 = Instant::now();
+        let mut c = HashMap::new();
+        let m = |v: f64| HashMap::from([("x".to_string(), v)]);
+        assert_eq!(counter_rate(&mut c, &m(100.0), "x", t0), None);
+        // Unchanged for 2 s: still no rate (not zero).
+        assert_eq!(
+            counter_rate(&mut c, &m(100.0), "x", t0 + Duration::from_secs(2)),
+            None
+        );
+        // Updated after 5 s: 500 over 5 s.
+        let t5 = t0 + Duration::from_secs(5);
+        assert_eq!(counter_rate(&mut c, &m(600.0), "x", t5), Some(100.0));
+        // Held between batches, zero once stale.
+        assert_eq!(
+            counter_rate(&mut c, &m(600.0), "x", t5 + Duration::from_secs(3)),
+            Some(100.0)
+        );
+        assert_eq!(
+            counter_rate(&mut c, &m(600.0), "x", t5 + Duration::from_secs(20)),
+            Some(0.0)
+        );
     }
 
     #[test]
