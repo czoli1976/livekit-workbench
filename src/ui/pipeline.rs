@@ -624,6 +624,15 @@ impl App {
                             self.local_undocked = true;
                         }
                     });
+                    let preview_error = self.session.shared.lock().preview_error.clone();
+                    if let Some(e) = preview_error {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(format!("Preview: {e}")).small().color(widgets::red(ui)),
+                            )
+                            .wrap(),
+                        );
+                    }
                     if self.local_undocked {
                         self.docked_placeholder(ui, width, height, true);
                     } else {

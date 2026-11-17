@@ -27,6 +27,10 @@ use form::PublishForm;
 use pipeline::{ChartMetric, PreviewLayout, PreviewPane, SubAsk};
 use stats_window::StatsUi;
 
+/// Camera formats listed in the background: (camera index, formats or error).
+/// Camera formats listed in the background: (request number, formats or error).
+type FormatsResult = (u64, Result<Vec<CameraFormat>, String>);
+
 pub struct App {
     rt: tokio::runtime::Runtime,
     session: Session,
@@ -47,6 +51,14 @@ pub struct App {
     cameras: Vec<CameraDesc>,
     camera_formats: Vec<CameraFormat>,
     formats_for: Option<u32>,
+    formats_pending: Arc<Mutex<Option<FormatsResult>>>,
+    /// Numbers each format request, so a late answer to an older one is ignored.
+    formats_generation: u64,
+    formats_retry: Instant,
+    /// The source last sent to the engine's preview-only capture.
+    preview_sent: Option<session::PublishConfig>,
+    /// Last local preview frame number seen, and when it changed.
+    preview_seq: (u64, Instant),
     camera_error: Option<String>,
 
     previews: bool,
@@ -129,6 +141,11 @@ impl App {
             cameras: Vec::new(),
             camera_formats: Vec::new(),
             formats_for: None,
+            formats_pending: Default::default(),
+            formats_generation: 0,
+            formats_retry: Instant::now(),
+            preview_sent: None,
+            preview_seq: (0, Instant::now()),
             camera_error: None,
             previews: true,
             chart: ChartMetric::Bitrate,
@@ -181,6 +198,11 @@ impl App {
         app.check_server_update();
         app.start_viewer_server();
         app.refresh_cameras();
+        // Start on the system's camera (the first one it lists); the synthetic
+        // sources stay one click away, and are the input when there is no camera.
+        if let Some(c) = app.cameras.first() {
+            app.form.source = SourceKind::Camera(c.index);
+        }
         app
     }
 
@@ -222,15 +244,63 @@ impl App {
         }
     }
 
+    /// Ask the camera for its formats off the UI thread: opening a camera can
+    /// take seconds, or block when access is not allowed.
     fn load_formats(&mut self, index: u32) {
-        if self.formats_for == Some(index) {
-            return;
-        }
-        self.formats_for = Some(index);
-        self.camera_formats.clear();
-        match capture::camera_formats(index) {
-            Ok(f) => {
+        // Camera access can be granted after the first try (the macOS prompt is
+        // still open at start-up, or the user allows it in Settings): re-check
+        // every 2 s while the panel shows an error, and list again once allowed.
+        if self.camera_error.is_some() && self.formats_retry.elapsed() > Duration::from_secs(2) {
+            self.formats_retry = Instant::now();
+            if capture::camera_access().is_ok() {
                 self.camera_error = None;
+                self.formats_for = None;
+                // Start the preview again now that the camera can be opened.
+                self.preview_sent = None;
+            }
+        }
+        if self.formats_for != Some(index) {
+            self.formats_for = Some(index);
+            self.camera_formats.clear();
+            self.formats_generation += 1;
+            let generation = self.formats_generation;
+            let slot = self.formats_pending.clone();
+            *slot.lock() = None;
+            std::thread::spawn(move || {
+                let r = capture::camera_formats(index).map_err(|e| format!("{e:#}"));
+                let mut s = slot.lock();
+                // Never let an older request overwrite a newer answer.
+                if s.as_ref().is_none_or(|(g, _)| *g <= generation) {
+                    *s = Some((generation, r));
+                }
+            });
+        }
+        let ready = {
+            let mut s = self.formats_pending.lock();
+            match s.as_ref() {
+                Some((g, _)) if *g == self.formats_generation => s.take(),
+                _ => None,
+            }
+        };
+        let Some((_, result)) = ready else {
+            return;
+        };
+        match result {
+            Ok(mut f) => {
+                self.camera_error = None;
+                if f.is_empty() {
+                    // Some cameras list no formats through this API: offer the
+                    // usual sizes and let the camera pick the closest.
+                    f = form::SIZES
+                        .iter()
+                        .filter(|s| s.2 <= 1080)
+                        .map(|&(_, w, h)| CameraFormat {
+                            width: w,
+                            height: h,
+                            fps: 30,
+                        })
+                        .collect();
+                }
                 let current = (self.form.capture, self.form.fps);
                 if !f.iter().any(|x| ((x.width, x.height), x.fps) == current) {
                     // Prefer 1080p30 or the closest below it, else the first format.
@@ -246,7 +316,7 @@ impl App {
                 }
                 self.camera_formats = f;
             }
-            Err(e) => self.camera_error = Some(format!("{e:#}")),
+            Err(e) => self.camera_error = Some(e),
         }
     }
 
@@ -961,6 +1031,28 @@ impl eframe::App for App {
                 self.status_line(ui);
             });
         self.note_seen();
+        // Show the chosen source in the local tile even when not publishing.
+        let want = self.previews.then(|| self.form.to_config());
+        // No preview frame for 3 s while one should show (the source failed to
+        // start, e.g. camera access still pending at start-up): ask again.
+        let seq = self.session.shared.lock().local_preview.lock().seq;
+        if seq != self.preview_seq.0 {
+            self.preview_seq = (seq, Instant::now());
+            // Frames from the camera are arriving now: any access error is stale.
+            if matches!(self.form.source, SourceKind::Camera(_)) {
+                self.camera_error = None;
+            }
+        } else if want.is_some()
+            && self.session.phase() != Phase::Publishing
+            && self.preview_seq.1.elapsed() > Duration::from_secs(3)
+        {
+            self.preview_seq.1 = Instant::now();
+            self.preview_sent = None;
+        }
+        if want != self.preview_sent {
+            self.session.set_preview(want.clone());
+            self.preview_sent = want;
+        }
         // WB_TEST_PENDING=1: make one republish change once publishing (checks).
         if self.session.phase() == Phase::Publishing
             && std::env::var_os("WB_TEST_PENDING").is_some()

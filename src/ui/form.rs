@@ -690,6 +690,9 @@ impl App {
     /// Check the form against this machine, returning a reason it cannot publish.
     pub(super) fn validate_form(&self) -> Result<PublishConfig, String> {
         let cfg = self.form.to_config();
+        if matches!(cfg.source, SourceKind::Camera(_)) {
+            crate::capture::camera_access().map_err(|e| format!("{e:#}"))?;
+        }
         self.caps.encoder_allowed(cfg.codec, cfg.encoder)?;
         if cfg.layering == Layering::Simulcast
             && !crate::capabilities::codec_supports_simulcast(cfg.codec)
