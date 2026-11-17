@@ -71,6 +71,8 @@ function browserLabel() {
 const params = new URLSearchParams(location.hash.slice(1));
 const url = params.get('url'), token = params.get('token');
 const adaptive = params.get('adaptive') === '1';
+const e2eeKey = params.get('e2ee');
+const SDK = 'https://cdn.jsdelivr.net/npm/livekit-client@2.24.0/dist/';
 let videoEl = null;
 let room = null, track = null, prev = null;
 
@@ -139,7 +141,23 @@ async function main() {
   if (!url || !token) { setStatus('This page needs a link from the Workbench for LiveKit app (missing url or token).', 'bad'); return; }
   if (!window.LivekitClient) { setStatus('Could not load the LiveKit JavaScript SDK from the CDN.', 'bad'); return; }
   const LK = window.LivekitClient;
-  room = new LK.Room({ adaptiveStream: adaptive, dynacast: false });
+  const options = { adaptiveStream: adaptive, dynacast: false };
+  if (e2eeKey) {
+    // Same shared passphrase as the app; the worker decrypts frames. A worker
+    // cannot be started from another origin directly, so load it as a blob.
+    try {
+      const keyProvider = new LK.ExternalE2EEKeyProvider();
+      await keyProvider.setKey(e2eeKey);
+      const src = await (await fetch(SDK + 'livekit-client.e2ee.worker.js')).text();
+      const worker = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+      options.e2ee = { keyProvider, worker };
+    } catch (e) { setStatus('Could not set up end-to-end encryption: ' + e.message, 'bad'); return; }
+  }
+  room = new LK.Room(options);
+  if (e2eeKey) {
+    room.on(LK.RoomEvent.EncryptionError, (e) => setStatus('Decryption failed: ' + (e && e.message || e), 'bad'));
+    await room.setE2EEEnabled(true);
+  }
   room.on(LK.RoomEvent.TrackSubscribed, (t, pub, participant) => {
     if (t.kind !== 'video') return;
     track = t; prev = null;

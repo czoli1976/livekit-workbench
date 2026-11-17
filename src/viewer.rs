@@ -74,10 +74,22 @@ impl ViewerServer {
     }
 
     /// The link a browser opens to join a room as a viewer.
-    pub fn link(&self, livekit_url: &str, token: &str, adaptive: bool) -> String {
+    /// `e2ee`: the shared passphrase, carried in the fragment so the server
+    /// never sees it.
+    pub fn link(
+        &self,
+        livekit_url: &str,
+        token: &str,
+        adaptive: bool,
+        e2ee: Option<&str>,
+    ) -> String {
         let mut l = link(self.port, livekit_url, token);
         if adaptive {
             l.push_str("&adaptive=1");
+        }
+        if let Some(key) = e2ee {
+            l.push_str("&e2ee=");
+            l.push_str(&encode(key));
         }
         l
     }

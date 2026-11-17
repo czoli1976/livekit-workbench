@@ -81,6 +81,21 @@ pub struct ConnectConfig {
     pub room: String,
     pub decode: bool,
     pub preview: bool,
+    /// End-to-end encryption with this shared passphrase (AES-GCM frame
+    /// encryption); both connections use it, so the subscriber can decrypt.
+    pub e2ee_key: Option<String>,
+}
+
+fn encryption(cfg: &ConnectConfig) -> Option<livekit::e2ee::E2eeOptions> {
+    use livekit::e2ee::key_provider::{KeyProvider, KeyProviderOptions};
+    let key = cfg.e2ee_key.as_ref()?;
+    Some(livekit::e2ee::E2eeOptions {
+        encryption_type: livekit::e2ee::EncryptionType::Gcm,
+        key_provider: KeyProvider::with_shared_key(
+            KeyProviderOptions::default(),
+            key.as_bytes().to_vec(),
+        ),
+    })
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -143,6 +158,9 @@ pub struct Shared {
     pub closing: Arc<std::sync::atomic::AtomicUsize>,
     /// Why the preview-only capture failed, cleared by its first frame.
     pub preview_error: Option<String>,
+    /// The subscriber's frame decryption state when E2EE is on: "Ok",
+    /// "DecryptionFailed", "MissingKey"…
+    pub e2ee_state: Option<String>,
 }
 
 enum Command {
@@ -496,6 +514,7 @@ impl Engine {
         let mut sub_opts = RoomOptions::default();
         sub_opts.auto_subscribe = true;
         sub_opts.adaptive_stream = false;
+        sub_opts.encryption = encryption(&cfg);
         let sub_token = token(&cfg, &format!("workbench-sub-{suffix}"), false)?;
         let (sub_room, sub_events) = tokio::time::timeout(
             CONNECT_TIMEOUT,
@@ -508,7 +527,11 @@ impl Engine {
         let pub_token = token(&cfg, &format!("workbench-pub-{suffix}"), true)?;
         let pub_result = tokio::time::timeout(
             CONNECT_TIMEOUT,
-            Room::connect(&cfg.url, &pub_token, RoomOptions::default()),
+            Room::connect(&cfg.url, &pub_token, {
+                let mut o = RoomOptions::default();
+                o.encryption = encryption(&cfg);
+                o
+            }),
         )
         .await;
         let (pub_room, mut pub_events) = match pub_result {
@@ -814,6 +837,7 @@ impl Engine {
         {
             let mut s = self.shared.lock();
             s.active_publish = None;
+            s.e2ee_state = None;
             clear_preview(&s.local_preview);
             clear_preview(&s.remote_preview);
         }
@@ -960,6 +984,18 @@ impl Engine {
                     } else {
                         *slot = Some(quality);
                     }
+                }
+            }
+            RoomEvent::E2eeStateChanged { state, .. } => {
+                let text = format!("{state:?}");
+                let changed = {
+                    let mut s = self.shared.lock();
+                    let changed = s.e2ee_state.as_deref() != Some(text.as_str());
+                    s.e2ee_state = Some(text.clone());
+                    changed
+                };
+                if changed {
+                    self.event(format!("E2EE: subscriber {text}"));
                 }
             }
             RoomEvent::DataReceived {

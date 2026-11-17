@@ -610,6 +610,34 @@ impl App {
             .color(widgets::weak(ui)),
         );
 
+        ui.separator();
+        // ---- Security
+        section(ui, "Security");
+        let connected = phase != Phase::Disconnected;
+        ui.add_enabled_ui(!connected, |ui| {
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.e2ee_on, "End-to-end encryption")
+                    .on_hover_text(
+                        "AES-GCM frame encryption with a shared passphrase. The server forwards media it cannot read. Both of the app's connections and browser viewers it opens use the same key.",
+                    );
+                widgets::badge(ui, "RECONNECT", super::theme::ACCENT_TEXT, super::theme::ACCENT_BG)
+                    .on_hover_text("Set before connecting: it applies to the whole connection.");
+            });
+            if self.e2ee_on {
+                ui.horizontal(|ui| {
+                    ui.label("Passphrase");
+                    ui.add(egui::TextEdit::singleline(&mut self.e2ee_key).desired_width(170.0));
+                });
+                ui.label(
+                    RichText::new("A test passphrase, saved in plain text with the app's settings.")
+                        .small()
+                        .color(widgets::weak(ui)),
+                );
+            }
+        })
+        .response
+        .on_disabled_hover_text("Disconnect to change encryption.");
+
         self.sanitize_form();
 
         // ---- Input changes apply to a live track at once; the rest wait in

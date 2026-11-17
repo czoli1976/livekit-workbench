@@ -101,6 +101,11 @@ pub struct App {
     settings_open: bool,
     test_pending_done: bool,
     codec_versions: crate::codec_versions::CodecVersions,
+    /// End-to-end encryption for the next connection, and its passphrase.
+    e2ee_on: bool,
+    e2ee_key: String,
+    /// The passphrase of the current connection, if it is encrypted.
+    connected_e2ee: Option<String>,
     /// Settings as last written to settings.json, and when.
     saved: Option<saved::Saved>,
     saved_at: Instant,
@@ -179,6 +184,9 @@ impl App {
             settings_open: true,
             test_pending_done: false,
             codec_versions: crate::codec_versions::read(),
+            e2ee_on: false,
+            connected_e2ee: None,
+            e2ee_key: "workbench-test-key".into(),
             saved: None,
             saved_at: Instant::now(),
             server_update: Default::default(),
@@ -473,10 +481,13 @@ impl App {
             room,
             decode: true,
             preview: self.previews,
+            e2ee_key: (self.e2ee_on && !self.e2ee_key.trim().is_empty())
+                .then(|| self.e2ee_key.trim().to_string()),
         };
         self.ask_sent = None;
         self.throttle.reset();
         self.connection = Some((profile, secret));
+        self.connected_e2ee = cfg.e2ee_key.clone();
         self.session.connect(cfg, publish);
     }
 
@@ -566,7 +577,15 @@ impl App {
         self.invites += 1;
         let identity = format!("browser-{}", self.invites);
         match session::viewer_token(&profile.api_key, &secret, &room, &identity) {
-            Ok(token) => Some(viewer.link(&profile.connect_url(), &token, self.browser_adaptive)),
+            Ok(token) => {
+                let key = self.connected_e2ee.clone();
+                Some(viewer.link(
+                    &profile.connect_url(),
+                    &token,
+                    self.browser_adaptive,
+                    key.as_deref(),
+                ))
+            }
             Err(e) => {
                 self.invite_note = format!("Could not create a token: {e:#}");
                 None

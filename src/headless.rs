@@ -10,6 +10,7 @@
 //!     --source detail|pattern          (default detail)
 //!     --seconds N                      (default 10)
 //!     --ask WxH                        ask the SFU for a layer that fits a WxH tile
+//!     --e2ee PASSPHRASE                end-to-end encryption with a shared key
 //!     --detail-hint                    content hint Detail / text (screencast flag)
 //!     --lifecycle                      also exercise unpublish, publish, republish, switch source
 //!
@@ -120,6 +121,7 @@ fn chrome_pub(
             room: room.into(),
             decode: true,
             preview: false,
+            e2ee_key: None,
         },
         None,
     );
@@ -290,7 +292,7 @@ pub fn run(args: &[String]) -> i32 {
             crate::session::viewer_token(&key, &secret, &room, "browser-1"),
         ) {
             (Ok(v), Ok(tok)) => {
-                println!("viewer: {}", v.link(&url, &tok, true));
+                println!("viewer: {}", v.link(&url, &tok, true, opt(args, "--e2ee")));
                 Some(v)
             }
             _ => None,
@@ -310,6 +312,7 @@ pub fn run(args: &[String]) -> i32 {
             room,
             decode: true,
             preview: false,
+            e2ee_key: opt(args, "--e2ee").map(str::to_string),
         },
         Some(publish.clone()),
     );
