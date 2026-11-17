@@ -13,6 +13,9 @@
 //!     --e2ee PASSPHRASE                end-to-end encryption with a shared key
 //!                                      (or LIVEKIT_E2EE_KEY, kept out of process listings)
 //!     --detail-hint                    content hint Detail / text (screencast flag)
+//!     --audio tone|MICROPHONE-NAME     also publish audio, and require it to arrive
+//!     --audio-kbps N                   Opus bitrate cap (default 32)
+//!     --no-dtx, --no-red               turn off Opus DTX or redundant audio
 //!     --lifecycle                      also exercise unpublish, publish, republish, switch source
 //!
 //! Connects with LIVEKIT_URL, LIVEKIT_API_KEY and LIVEKIT_API_SECRET, or the
@@ -25,7 +28,9 @@ use livekit::options::{DegradationPreference, VideoCodec};
 
 use crate::capabilities::EncoderChoice;
 use crate::capture::SourceKind;
-use crate::session::{ConnectConfig, Layering, Phase, PublishConfig, Session};
+use crate::session::{
+    AudioConfig, AudioInput, ConnectConfig, Layering, Phase, PublishConfig, Session,
+};
 
 fn opt<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
     args.iter()
@@ -80,6 +85,14 @@ fn line(s: &Session, sec: u64) -> (u32, f64) {
                 println!("      {n}: {:?} {}", v.health, v.reason);
             }
         }
+    }
+    let a = &snap.audio;
+    if !a.source.is_empty() || a.receiving {
+        println!(
+            "      audio send {} {:.1} kbps level {:.2} rtt {:.0} ms | recv {} {:.1} kbps loss {:.1}% jitter {:.1} ms buffer {:.0} ms concealed {:.1}%",
+            a.send_codec, a.send_kbps, a.send_level, a.rtt_ms,
+            a.recv_codec, a.recv_kbps, a.loss_ratio * 100.0, a.jitter_ms, a.jitter_buffer_ms, a.concealed_pct,
+        );
     }
     if std::env::var("WB_QUALITY").is_ok() {
         println!(
@@ -280,6 +293,20 @@ pub fn run(args: &[String]) -> i32 {
         layering,
         screen_share: false,
         detail_hint: args.iter().any(|a| a == "--detail-hint"),
+        audio: AudioConfig {
+            input: match opt(args, "--audio") {
+                None => AudioInput::Off,
+                Some("tone") => AudioInput::Tone,
+                Some(name) => AudioInput::Microphone(name.to_string()),
+            },
+            bitrate_bps: opt(args, "--audio-kbps")
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(32)
+                * 1000,
+            dtx: !args.iter().any(|a| a == "--no-dtx"),
+            red: !args.iter().any(|a| a == "--no-red"),
+            ..Default::default()
+        },
     };
     // The passphrase: LIVEKIT_E2EE_KEY keeps it out of process listings and
     // shell history; --e2ee still works for quick tests.
@@ -344,6 +371,12 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     let mut ok = received;
+    if publish.audio.input != AudioInput::Off {
+        let a = session.shared.lock().snapshot.audio.clone();
+        let heard = a.receiving && a.recv_kbps > 0.0;
+        println!("audio: {}", if heard { "received" } else { "NOT received" });
+        ok &= heard;
+    }
     // --ask WxH: ask the SFU for a layer that fits a tile of that size.
     if let Some((aw, ah)) = opt(args, "--ask")
         .and_then(|s| s.split_once('x'))

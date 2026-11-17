@@ -37,6 +37,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSCameraUsageDescription</key><string>Workbench for LiveKit publishes your camera to a LiveKit room so you can see what the video pipeline does with it.</string>
+  <key>NSMicrophoneUsageDescription</key><string>Workbench for LiveKit publishes your microphone to a LiveKit room when you choose it as the audio input.</string>
   $ICON_KEY
 </dict>
 </plist>

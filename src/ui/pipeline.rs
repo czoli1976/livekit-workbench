@@ -231,6 +231,24 @@ impl App {
             );
         }
 
+        // Audio, one line.
+        let audio = self.session.shared.lock().snapshot.audio.clone();
+        if phase.connected() && (!audio.source.is_empty() || audio.receiving) {
+            let bad = audio.concealed_pct > 5.0 || audio.loss_ratio > 0.05;
+            ui.label(
+                RichText::new(format!(
+                    "Audio · sent {:.0} kbps · received {:.0} kbps · loss {:.1} % · jitter buffer {:.0} ms · concealed {:.1} %",
+                    audio.send_kbps,
+                    audio.recv_kbps,
+                    audio.loss_ratio * 100.0,
+                    audio.jitter_buffer_ms,
+                    audio.concealed_pct
+                ))
+                .small()
+                .color(if bad { widgets::amber(ui) } else { widgets::weak(ui) }),
+            );
+        }
+
         // Encryption of the current connection.
         if phase.connected() && self.connected_e2ee.is_some() {
             let state = self.session.shared.lock().e2ee_state.clone();

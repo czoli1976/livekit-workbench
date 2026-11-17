@@ -647,6 +647,8 @@ impl App {
                     }
                 });
         });
+
+        audio_tiles(ui, &snap.audio);
     }
 
     fn server_tab(&mut self, ui: &mut egui::Ui) {
@@ -785,6 +787,62 @@ fn tile(ui: &mut egui::Ui, title: &str, value: String, sub: String) {
             ui.label(RichText::new(value).size(16.0).strong());
             ui.label(RichText::new(sub).small().color(widgets::weak(ui)));
         });
+}
+
+/// Opus in both directions, when audio is published.
+fn audio_tiles(ui: &mut egui::Ui, a: &crate::stats::AudioStats) {
+    if a.source.is_empty() && !a.receiving {
+        return;
+    }
+    ui.add_space(8.0);
+    ui.label(RichText::new(format!("Audio · {}", or_dash(&a.source))).strong());
+    ui.columns(6, |c| {
+        tile(
+            &mut c[0],
+            "Sent",
+            format!("{:.1} kbps", a.send_kbps),
+            format!("{} · level {:.2}", or_dash(&a.send_codec), a.send_level),
+        );
+        tile(
+            &mut c[1],
+            "Received",
+            format!("{:.1} kbps", a.recv_kbps),
+            format!("level {:.2}", a.recv_level),
+        );
+        tile(
+            &mut c[2],
+            "Loss",
+            format!("{:.1} %", a.loss_ratio * 100.0),
+            format!(
+                "{} lost · server sees {:.1} %",
+                a.lost,
+                a.server_loss * 100.0
+            ),
+        );
+        tile(
+            &mut c[3],
+            "Jitter",
+            format!("{:.1} ms", a.jitter_ms),
+            format!("RTT {:.0} ms", a.rtt_ms),
+        );
+        tile(
+            &mut c[4],
+            "Jitter buffer",
+            format!("{:.0} ms", a.jitter_buffer_ms),
+            "NetEq playout delay".into(),
+        );
+        tile(
+            &mut c[5],
+            "Concealed",
+            format!("{:.1} %", a.concealed_pct),
+            format!("{} events", a.concealment_events),
+        );
+    });
+    ui.label(
+        RichText::new("Concealed is the share of played audio that the receiver invented to cover lost or late packets, over the last second. RED keeps it near zero under light loss; DTX makes the sent rate drop in silences.")
+            .small()
+            .color(widgets::weak(ui)),
+    );
 }
 
 fn rid_name(rid: &str) -> &'static str {
