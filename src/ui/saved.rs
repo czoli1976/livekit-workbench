@@ -38,6 +38,9 @@ pub struct Saved {
     pub chart: String,
     pub settings_open: Option<bool>,
     pub sub_ask: String,
+    pub e2ee: Option<bool>,
+    /// A test passphrase, stored in plain text.
+    pub e2ee_key: Option<String>,
 }
 
 fn path() -> Option<PathBuf> {
@@ -150,6 +153,8 @@ impl App {
             chart: format!("{:?}", self.chart).to_lowercase(),
             settings_open: Some(self.settings_open),
             sub_ask: format!("{:?}", self.sub_ask).to_lowercase(),
+            e2ee: Some(self.e2ee_on),
+            e2ee_key: Some(self.e2ee_key.clone()),
         }
     }
 
@@ -225,6 +230,12 @@ impl App {
             "quarter" => SubAsk::Quarter,
             _ => SubAsk::Top,
         };
+        if let Some(v) = s.e2ee {
+            self.e2ee_on = v;
+        }
+        if let Some(k) = s.e2ee_key.as_ref().filter(|k| !k.is_empty()) {
+            self.e2ee_key = k.clone();
+        }
         self.sanitize_form();
     }
 

@@ -231,6 +231,29 @@ impl App {
             );
         }
 
+        // Encryption of the current connection.
+        if phase.connected() && self.connected_e2ee.is_some() {
+            let state = self.session.shared.lock().e2ee_state.clone();
+            let (text, color) = match state.as_deref() {
+                Some("Ok") | Some("New") | None => (
+                    format!(
+                        "E2EE on (AES-GCM) · subscriber {}",
+                        state
+                            .as_deref()
+                            .map(|s| if s == "Ok" { "decrypting" } else { "starting" })
+                            .unwrap_or("waiting for media")
+                    ),
+                    widgets::green(ui),
+                ),
+                Some(s) => (
+                    format!("E2EE on (AES-GCM) · subscriber: {s}"),
+                    widgets::red(ui),
+                ),
+            };
+            ui.label(RichText::new(text).small().color(color))
+                .on_hover_text("Frame encryption state reported by the app's subscriber. DecryptionFailed or MissingKey usually means the keys differ.");
+        }
+
         // Health legend.
         ui.horizontal(|ui| {
             ui.label(

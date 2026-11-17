@@ -101,6 +101,11 @@ pub struct App {
     settings_open: bool,
     test_pending_done: bool,
     codec_versions: crate::codec_versions::CodecVersions,
+    /// End-to-end encryption for the next connection, and its passphrase.
+    e2ee_on: bool,
+    e2ee_key: String,
+    /// The passphrase of the current connection, if it is encrypted.
+    connected_e2ee: Option<String>,
     /// Settings as last written to settings.json, and when.
     saved: Option<saved::Saved>,
     saved_at: Instant,
@@ -182,6 +187,9 @@ impl App {
             settings_open: true,
             test_pending_done: false,
             codec_versions: crate::codec_versions::read(),
+            e2ee_on: false,
+            connected_e2ee: None,
+            e2ee_key: random_passphrase(),
             saved: None,
             saved_at: Instant::now(),
             persist_settings: std::env::var_os("WB_OPEN").is_none(),
@@ -462,6 +470,10 @@ impl App {
                 return;
             }
         };
+        if self.e2ee_on && self.e2ee_key.trim().is_empty() {
+            self.notify("End-to-end encryption is on but the passphrase is empty. Enter one, or turn encryption off.");
+            return;
+        }
         let room = self.room.trim().to_string();
         if room.is_empty() {
             self.notify("Enter a room name.");
@@ -485,10 +497,12 @@ impl App {
             room,
             decode: true,
             preview: self.previews,
+            e2ee_key: self.e2ee_on.then(|| self.e2ee_key.trim().to_string()),
         };
         self.ask_sent = None;
         self.throttle.reset();
         self.connection = Some((profile, secret));
+        self.connected_e2ee = cfg.e2ee_key.clone();
         self.session.connect(cfg, publish);
     }
 
@@ -578,7 +592,15 @@ impl App {
         self.invites += 1;
         let identity = format!("browser-{}", self.invites);
         match session::viewer_token(&profile.api_key, &secret, &room, &identity) {
-            Ok(token) => Some(viewer.link(&profile.connect_url(), &token, self.browser_adaptive)),
+            Ok(token) => {
+                let key = self.connected_e2ee.clone();
+                Some(viewer.link(
+                    &profile.connect_url(),
+                    &token,
+                    self.browser_adaptive,
+                    key.as_deref(),
+                ))
+            }
             Err(e) => {
                 self.invite_note = format!("Could not create a token: {e:#}");
                 None
@@ -1180,4 +1202,26 @@ impl eframe::App for App {
         self.save_settings(true);
         self.shutdown();
     }
+}
+
+/// A fresh passphrase for first use, so nobody starts on a key published in
+/// this source. Not a password generator: it is a test key, saved in plain text.
+fn random_passphrase() -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    h.update(now.as_nanos().to_le_bytes());
+    h.update(std::process::id().to_le_bytes());
+    let local = 0u8;
+    h.update((&local as *const u8 as usize).to_le_bytes());
+    let d = h.finalize();
+    format!(
+        "wb-{}",
+        d.iter()
+            .take(8)
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    )
 }
