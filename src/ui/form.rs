@@ -590,36 +590,63 @@ impl App {
 
         self.sanitize_form();
 
-        // ---- Apply changes to a live track
+        // ---- Input changes apply to a live track at once; the rest wait in
+        // the banner pinned above this panel (pending_banner).
         if publishing {
             if let Some(active) = &active {
                 let want = self.form.to_config();
-                let pending = diff(active, &want);
-                if pending.live && self.form != before {
-                    self.session.switch_source(want.clone());
-                }
-                if !pending.republish.is_empty() {
-                    ui.add_space(8.0);
-                    egui::Frame::group(ui.style()).stroke(egui::Stroke::new(1.0, widgets::amber(ui))).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        let n = pending.republish.len();
-                        ui.label(format!(
-                            "{n} pending change{}: {}. Applying republishes the track, about 1 s without video.",
-                            if n == 1 { "" } else { "s" },
-                            pending.republish.join(", ")
-                        ));
-                        ui.horizontal(|ui| {
-                            if ui.button(RichText::new("Apply").strong()).clicked() {
-                                self.publish_or_republish(true);
-                            }
-                            if ui.button("Revert").clicked() {
-                                self.revert_form(active);
-                            }
-                        });
-                    });
+                if diff(active, &want).live && self.form != before {
+                    self.session.switch_source(want);
                 }
             }
         }
+    }
+
+    /// Pending republish changes, pinned above the scrolling settings so it is
+    /// always in view.
+    pub(super) fn pending_banner(&mut self, ui: &mut egui::Ui) {
+        if self.session.phase() != Phase::Publishing {
+            return;
+        }
+        let Some(active) = self.session.shared.lock().active_publish.clone() else {
+            return;
+        };
+        let pending = diff(&active, &self.form.to_config());
+        if pending.republish.is_empty() {
+            return;
+        }
+        egui::Frame::new()
+            .fill(super::theme::AMBER_BG)
+            .stroke(egui::Stroke::new(1.0, widgets::amber(ui)))
+            .corner_radius(8)
+            .inner_margin(egui::Margin::same(10))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let n = pending.republish.len();
+                ui.label(
+                    RichText::new(format!(
+                        "{n} pending change{}: {}",
+                        if n == 1 { "" } else { "s" },
+                        pending.republish.join(", ")
+                    ))
+                    .strong()
+                    .color(super::theme::AMBER_TEXT),
+                );
+                ui.label(
+                    RichText::new("Applying republishes the track, about 1 s without video.")
+                        .small()
+                        .color(super::theme::AMBER_TEXT),
+                );
+                ui.horizontal(|ui| {
+                    if ui.add(widgets::accent_button("Apply")).clicked() {
+                        self.publish_or_republish(true);
+                    }
+                    if ui.button("Revert").clicked() {
+                        self.revert_form(&active);
+                    }
+                });
+            });
+        ui.add_space(8.0);
     }
 
     fn revert_form(&mut self, a: &PublishConfig) {

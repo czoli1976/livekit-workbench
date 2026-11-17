@@ -84,6 +84,8 @@ pub struct App {
     >,
     /// The left settings panel is open.
     settings_open: bool,
+    test_pending_done: bool,
+    codec_versions: crate::codec_versions::CodecVersions,
     /// Browser viewers ask the SFU for a layer that fits their video element.
     browser_adaptive: bool,
 }
@@ -144,6 +146,8 @@ impl App {
             browser_adaptive: false,
             seen: Default::default(),
             settings_open: true,
+            test_pending_done: false,
+            codec_versions: crate::codec_versions::read(),
             autoconnect_pending: std::env::var_os("WB_AUTOCONNECT").is_some(),
             rt,
         };
@@ -745,6 +749,14 @@ impl eframe::App for App {
                 self.status_line(ui);
             });
         self.note_seen();
+        // WB_TEST_PENDING=1: make one republish change once publishing (checks).
+        if self.session.phase() == Phase::Publishing
+            && std::env::var_os("WB_TEST_PENDING").is_some()
+            && !self.test_pending_done
+        {
+            self.test_pending_done = true;
+            self.form.bitrate_mbps += 1.0;
+        }
         // A handle strip next to the settings panel opens and closes it.
         let mut open = self.settings_open;
         egui::Panel::left("settings")
@@ -752,6 +764,7 @@ impl eframe::App for App {
             .default_size(400.0)
             .resizable(true)
             .show_collapsible(ui, &mut open, |ui| {
+                self.pending_banner(ui);
                 egui::ScrollArea::vertical()
                     .auto_shrink(false)
                     .show(ui, |ui| self.settings_ui(ui));

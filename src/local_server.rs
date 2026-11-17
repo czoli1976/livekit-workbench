@@ -113,6 +113,79 @@ fn config_yaml(opts: &LocalServerOptions) -> String {
     )
 }
 
+/// Where the app notes the process id of the server it started.
+fn pid_file() -> Option<PathBuf> {
+    directories::ProjectDirs::from("io", "czoli1976", "livekit-workbench")
+        .map(|d| d.data_dir().join("livekit-server.pid"))
+}
+
+fn remove_pid_file() {
+    if let Some(p) = pid_file() {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+/// Stop the server a previous run of this app started, if it is still
+/// running. Checks the process really is livekit-server first, so a reused
+/// process id is never touched. Returns true if one was stopped.
+async fn stop_orphan() -> bool {
+    let Some(path) = pid_file() else { return false };
+    let Some(pid) = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+    else {
+        return false;
+    };
+    let _ = std::fs::remove_file(&path);
+    if !process_is_livekit_server(pid) {
+        return false;
+    }
+    terminate(pid);
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if !process_is_livekit_server(pid) {
+            return true;
+        }
+    }
+    true
+}
+
+#[cfg(unix)]
+fn process_is_livekit_server(pid: u32) -> bool {
+    std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("livekit-server"))
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn process_is_livekit_server(pid: u32) -> bool {
+    std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .to_ascii_lowercase()
+                .contains("livekit-server")
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(unix)]
+fn terminate(pid: u32) {
+    let _ = std::process::Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status();
+}
+
+#[cfg(windows)]
+fn terminate(pid: u32) {
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F"])
+        .status();
+}
+
 async fn port_open(port: u16) -> bool {
     tokio::time::timeout(
         Duration::from_millis(300),
@@ -146,6 +219,12 @@ impl LocalServer {
             inner.state = ServerState::Starting;
             inner.stats = ServerStats::default();
             inner.prev_metrics = None;
+        }
+        // A server this app started in an earlier run that ended without
+        // cleaning up (crash, force quit) is orphaned: its log pipe is gone,
+        // so it dies on its next log line. Replace it rather than adopt it.
+        if stop_orphan().await {
+            log::info!("stopped a livekit-server left by an earlier run");
         }
         // A server left by the previous run may still be shutting down: it
         // keeps the port open for a moment, then refuses connections. Adopt
@@ -203,6 +282,9 @@ impl LocalServer {
             .kill_on_drop(true)
             .spawn()
             .with_context(|| format!("starting {}", binary.display()))?;
+        if let (Some(pid), Some(path)) = (child.id(), pid_file()) {
+            let _ = std::fs::write(path, pid.to_string());
+        }
 
         for pipe in [
             child
@@ -281,6 +363,7 @@ impl LocalServer {
         if let Some(mut child) = child {
             let _ = child.start_kill();
             let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+            remove_pid_file();
         }
     }
 
@@ -298,7 +381,9 @@ impl LocalServer {
                 std::thread::sleep(Duration::from_millis(20));
             }
         }
-        inner.child = None;
+        if inner.child.take().is_some() {
+            remove_pid_file();
+        }
         inner.state = ServerState::Stopped;
     }
 

@@ -5,6 +5,7 @@
 
 mod capabilities;
 mod capture;
+mod codec_versions;
 mod headless;
 mod health;
 mod local_server;
@@ -24,6 +25,7 @@ fn main() -> eframe::Result {
     match args.first().map(String::as_str) {
         Some("--version" | "-V") => {
             println!("{}", version::summary());
+            println!("Codec libraries: {}", codec_versions::read().summary());
             return Ok(());
         }
         Some("--caps") => {

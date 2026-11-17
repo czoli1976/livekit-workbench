@@ -159,7 +159,14 @@ impl App {
             .striped(true)
             .spacing([16.0, 5.0])
             .show(ui, |ui| {
-                for h in ["Framework", "Kind", "Encodes", "Decodes", "Decode list"] {
+                for h in [
+                    "Framework",
+                    "Kind",
+                    "Version",
+                    "Encodes",
+                    "Decodes",
+                    "Decode list",
+                ] {
                     ui.label(RichText::new(h).strong());
                 }
                 ui.end_row();
@@ -170,6 +177,11 @@ impl App {
                     } else {
                         ui.label("software");
                     }
+                    ui.label(
+                        RichText::new(self.codec_versions.for_framework(&f.name))
+                            .monospace()
+                            .small(),
+                    );
                     ui.label(names(&f.encodes));
                     ui.label(names(&f.decodes));
                     ui.label(
@@ -558,6 +570,7 @@ impl App {
                 ui.vertical(|ui| {
                     ui.label(RichText::new(format!("LiveKit Rust SDK {}", version::LIVEKIT_SDK)).strong());
                     ui.label(RichText::new(format!("libwebrtc {} · webrtc-sys {} · egui {}", version::LIBWEBRTC, version::WEBRTC_SYS, version::EGUI)).small());
+                    ui.label(RichText::new(self.codec_versions.summary()).small());
                 });
                 ui.end_row();
                 ui.label(RichText::new("Licence").color(widgets::weak(ui)));
@@ -567,7 +580,11 @@ impl App {
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 if ui.button("Copy version info").clicked() {
-                    ui.ctx().copy_text(version::summary());
+                    ui.ctx().copy_text(format!(
+                        "{}\nCodec libraries: {}",
+                        version::summary(),
+                        self.codec_versions.summary()
+                    ));
                 }
                 if ui.button("Close").clicked() {
                     self.show_about = false;
