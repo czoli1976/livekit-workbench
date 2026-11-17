@@ -9,14 +9,18 @@ use crate::capabilities::{codec_name, codec_supports_svc, EncoderChoice, ALL_COD
 use crate::capture::SourceKind;
 use crate::session::{Layering, Phase, PublishConfig};
 
-/// What "Detail (screencast)" changes, read from WebRTC m150 and LiveKit's
-/// fork of it (the SDK sets the source's screencast flag).
-const CONTENT_HINT_HELP: &str = "Marks the source as screen content. What that changes:\n\
+/// What the content hint does, read from WebRTC m150 and LiveKit's fork.
+/// The SDK has no public contentHint setter, so the app sets the source's
+/// screencast flag: WebRTC's sender maps contentHint "detail" and "text" to
+/// that same flag ("motion" clears it), and nothing else reads the hint once
+/// an explicit degradation preference is set, which the SDK always does.
+const CONTENT_HINT_HELP: &str = "Equivalent to the W3C contentHint. The LiveKit Rust SDK has no contentHint setter, so the app sets the video source's screencast flag, which is exactly what WebRTC turns contentHint \"detail\" and \"text\" into (\"motion\" clears it). Detail and text therefore behave the same.\n\n\
+With Detail / text:\n\
 • When constrained = Balanced becomes Keep resolution: WebRTC drops frames instead of lowering the size.\n\
 • VideoToolbox (H.264, H.265): QP capped at 39, and H.264 uses the Baseline profile at an automatic level.\n\
 • OpenH264: switches to its screen-content mode.\n\
-• All encoders: frames are labelled as screen share for receivers, and the bitrate cap is raised to at least 1.2 Mbps.\n\
-NVENC, VAAPI and Jetson encoders ignore it beyond the WebRTC-level changes.";
+• All encoders: frames are labelled as screen content for receivers, and the bitrate cap is raised to at least 1.2 Mbps.\n\
+NVENC, VAAPI and Jetson encoders do nothing extra with it.";
 
 pub const SIZES: &[(&str, u32, u32)] = &[
     ("360p", 640, 360),
@@ -327,11 +331,11 @@ impl App {
                 republish_badge(ui);
             });
             egui::ComboBox::from_id_salt("hint")
-                .selected_text(if self.form.detail_hint { "Detail (screencast)" } else { "Motion (camera)" })
+                .selected_text(if self.form.detail_hint { "Detail / text" } else { "Motion" })
                 .width(190.0)
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.form.detail_hint, false, "Motion (camera)");
-                    ui.selectable_value(&mut self.form.detail_hint, true, "Detail (screencast)")
+                    ui.selectable_value(&mut self.form.detail_hint, false, "Motion");
+                    ui.selectable_value(&mut self.form.detail_hint, true, "Detail / text")
                         .on_hover_text(CONTENT_HINT_HELP);
                 });
             ui.end_row();
