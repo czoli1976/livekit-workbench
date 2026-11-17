@@ -98,6 +98,11 @@ impl App {
             .build()
             .expect("tokio runtime");
         theme::install(&cc.egui_ctx);
+        // Scanning the executable for WebRTC's source stamp reads the whole
+        // file once; do it off the UI thread.
+        std::thread::spawn(|| {
+            let _ = version::webrtc_source_stamp();
+        });
         let ctx = cc.egui_ctx.clone();
         let repaint: Arc<dyn Fn() + Send + Sync> = Arc::new(move || ctx.request_repaint());
         let session = Session::start(rt.handle(), repaint);
@@ -657,8 +662,9 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
                     RichText::new(format!(
-                        "LiveKit Rust SDK {} · v{}",
+                        "LiveKit Rust SDK {} · WebRTC {} · v{}",
                         version::LIVEKIT_SDK,
+                        version::WEBRTC_MILESTONE,
                         version::APP_VERSION
                     ))
                     .small()

@@ -36,10 +36,11 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new(format!(
-                            "{} {} · LiveKit Rust SDK {} · backends: {}",
+                            "{} {} · LiveKit Rust SDK {} · {} · backends: {}",
                             std::env::consts::OS,
                             std::env::consts::ARCH,
                             version::LIVEKIT_SDK,
+                            version::webrtc(),
                             self.caps.backends.iter().map(|b| backend_name(*b)).collect::<Vec<_>>().join(", ")
                         ))
                         .color(widgets::weak(ui)),
@@ -569,6 +570,7 @@ impl App {
                 ui.label(RichText::new("Built with").color(widgets::weak(ui)));
                 ui.vertical(|ui| {
                     ui.label(RichText::new(format!("LiveKit Rust SDK {}", version::LIVEKIT_SDK)).strong());
+                    ui.label(RichText::new(version::webrtc()).strong());
                     ui.label(RichText::new(format!("libwebrtc {} · webrtc-sys {} · egui {}", version::LIBWEBRTC, version::WEBRTC_SYS, version::EGUI)).small());
                     ui.label(RichText::new(self.codec_versions.summary()).small());
                 });
