@@ -673,17 +673,29 @@ impl App {
         });
         let a = &mut self.form.audio;
         let mics = &mut self.microphones;
+        let mic_error = &mut self.mic_error;
         egui::Grid::new("audio-grid")
             .num_columns(2)
             .spacing([8.0, 4.0])
             .show(ui, |ui| {
                 ui.label("Input");
+                ui.horizontal(|ui| {
                 egui::ComboBox::from_id_salt("audio-input")
                     .selected_text(a.input.label())
                     .width(190.0)
                     .show_ui(ui, |ui| {
-                        // Listing opens the platform audio device, so only on demand.
-                        let list = mics.get_or_insert_with(crate::session::microphones);
+                        // Listing opens the platform audio device, so only on
+                        // demand; only a successful list is kept.
+                        if mics.is_none() {
+                            match crate::session::microphones() {
+                                Ok(l) => {
+                                    *mics = Some(l);
+                                    *mic_error = None;
+                                }
+                                Err(e) => *mic_error = Some(e),
+                            }
+                        }
+                        let list = mics.clone().unwrap_or_default();
                         ui.selectable_value(&mut a.input, AudioInput::Off, "Off");
                         ui.selectable_value(&mut a.input, AudioInput::Tone, "Synthetic tone")
                             .on_hover_text("A 440 Hz beep, 0.6 s on and 0.4 s off. Needs no microphone and plays nothing here.");
@@ -695,6 +707,15 @@ impl App {
                             );
                         }
                     });
+                if ui
+                    .small_button("⟳")
+                    .on_hover_text("List the microphones again")
+                    .clicked()
+                {
+                    *mics = None;
+                    *mic_error = None;
+                }
+                });
                 ui.end_row();
                 if a.input == AudioInput::Off {
                     return;
@@ -731,6 +752,10 @@ impl App {
                     ui.end_row();
                 }
             });
+        if let Some(e) = &self.mic_error {
+            ui.label(RichText::new(e).small().color(widgets::red(ui)));
+        }
+        let a = &self.form.audio;
         if matches!(a.input, AudioInput::Microphone(_)) {
             ui.label(
                 RichText::new("The app also receives its own audio and plays it, about a round trip late. Use headphones, or keep echo cancellation on.")

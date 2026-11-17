@@ -105,6 +105,8 @@ pub struct App {
     e2ee_on: bool,
     /// Microphone names, listed the first time the audio input list opens.
     microphones: Option<Vec<String>>,
+    /// Why the microphones could not be listed; the list is retried on open.
+    mic_error: Option<String>,
     e2ee_key: String,
     /// The passphrase of the current connection, if it is encrypted.
     connected_e2ee: Option<String>,
@@ -191,6 +193,7 @@ impl App {
             codec_versions: crate::codec_versions::read(),
             e2ee_on: false,
             microphones: None,
+            mic_error: None,
             connected_e2ee: None,
             e2ee_key: random_passphrase(),
             saved: None,
