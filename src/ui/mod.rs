@@ -3,6 +3,7 @@
 mod dialogs;
 mod form;
 mod pipeline;
+mod saved;
 mod stats_window;
 mod theme;
 mod widgets;
@@ -98,6 +99,12 @@ pub struct App {
     settings_open: bool,
     test_pending_done: bool,
     codec_versions: crate::codec_versions::CodecVersions,
+    /// Settings as last written to settings.json, and when.
+    saved: Option<saved::Saved>,
+    saved_at: Instant,
+    /// False for scripted launches (WB_OPEN) and when the settings file could
+    /// not be read: then nothing is written over the user's settings.
+    persist_settings: bool,
     /// Newer livekit-server check and update, shared with background work.
     server_update: Arc<Mutex<crate::server_update::UpdateState>>,
     /// Browser viewers ask the SFU for a layer that fits their video element.
@@ -172,6 +179,9 @@ impl App {
             settings_open: true,
             test_pending_done: false,
             codec_versions: crate::codec_versions::read(),
+            saved: None,
+            saved_at: Instant::now(),
+            persist_settings: std::env::var_os("WB_OPEN").is_none(),
             server_update: Default::default(),
             autoconnect_pending: std::env::var_os("WB_AUTOCONNECT").is_some(),
             rt,
@@ -202,6 +212,21 @@ impl App {
         // sources stay one click away, and are the input when there is no camera.
         if let Some(c) = app.cameras.first() {
             app.form.source = SourceKind::Camera(c.index);
+        }
+        // Settings from the last run, unless this is a scripted dev launch.
+        if app.persist_settings {
+            match saved::load() {
+                Ok(Some(s)) => {
+                    app.apply_saved(&s);
+                    app.saved = Some(s);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    log::warn!("settings: {e}");
+                    // A file that could not even be read is not overwritten.
+                    app.persist_settings = e.contains("is not valid");
+                }
+            }
         }
         app
     }
@@ -1031,6 +1056,7 @@ impl eframe::App for App {
                 self.status_line(ui);
             });
         self.note_seen();
+        self.save_settings(false);
         // Show the chosen source in the local tile even when not publishing.
         let want = self.previews.then(|| self.form.to_config());
         // No preview frame for 3 s while one should show (the source failed to
@@ -1138,6 +1164,7 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self) {
+        self.save_settings(true);
         self.shutdown();
     }
 }
