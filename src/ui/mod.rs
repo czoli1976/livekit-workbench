@@ -103,6 +103,9 @@ pub struct App {
     codec_versions: crate::codec_versions::CodecVersions,
     /// End-to-end encryption for the next connection, and its passphrase.
     e2ee_on: bool,
+    /// Connect through the in-app impairment relay.
+    impair_on: bool,
+    connected_impair: bool,
     /// Microphone names, listed the first time the audio input list opens.
     microphones: Option<Vec<String>>,
     /// Why the microphones could not be listed; the list is retried on open.
@@ -192,6 +195,8 @@ impl App {
             test_pending_done: false,
             codec_versions: crate::codec_versions::read(),
             e2ee_on: false,
+            impair_on: false,
+            connected_impair: false,
             microphones: None,
             mic_error: None,
             connected_e2ee: None,
@@ -504,11 +509,13 @@ impl App {
             decode: true,
             preview: self.previews,
             e2ee_key: self.e2ee_on.then(|| self.e2ee_key.trim().to_string()),
+            impair: self.impair_on,
         };
         self.ask_sent = None;
         self.throttle.reset();
         self.connection = Some((profile, secret));
         self.connected_e2ee = cfg.e2ee_key.clone();
+        self.connected_impair = cfg.impair;
         self.session.connect(cfg, publish);
     }
 

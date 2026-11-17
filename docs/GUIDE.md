@@ -91,13 +91,45 @@ While publishing, republish changes collect in a banner at the top of the panel;
 
 What the settings do:
 
-- **Input:** a camera, *Synthetic: detailed motion* (changes every pixel, needs a realistic bitrate) or *Synthetic: moving pattern* (cheap to encode).
+- **Input:** a camera, *Synthetic: detailed motion* (changes every pixel, needs a realistic bitrate), *Synthetic: moving pattern* (cheap to encode) or *Screen*. The input shows in the local preview as soon as you pick it, before you connect. *Screen* opens the system picker (macOS, Wayland) when publishing starts, and sets the track source to *Screen share* and the content hint to *Detail / text*. On macOS the app needs Screen Recording permission.
 - **Publish size:** frames are scaled to this before the encoder. Pick a fixed size to switch inputs live.
 - **Track source:** *Screen share* makes the SDK start WebRTC's bitrate estimate near the cap instead of at most 1 Mbps.
 - **Content hint:** *Motion* or *Detail / text*, the equivalent of the W3C `contentHint`. Detail / text turns *Balanced* into *keep resolution*, and changes encoder settings for VideoToolbox and OpenH264; hover it for the details.
 - **Codec and encoder:** only what this machine can do is enabled; hover a greyed-out option for the reason. *Auto* says which encoder it resolves to.
 - **Layers:** *Single*, *Simulcast* (VP8, H.264, H.265) or *SVC* (VP9 and AV1 with a software encoder) with a scalability mode such as L3T3_KEY.
 - **Rate control:** the bitrate cap, the max frame rate, and *When constrained* (keep resolution, keep frame rate, balanced, or keep both).
+- **Audio** (REPUBLISH): *Off*, *Synthetic tone* or a microphone.
+  - *Synthetic tone* is a 440 Hz beep, 0.6 s on and 0.4 s off. It needs no microphone and plays nothing.
+  - With a microphone, the app plays the audio it receives, about a round trip late. Use headphones, or keep echo cancellation (AEC) on.
+  - Opus settings: the bitrate cap, *DTX* (almost nothing is sent during silence) and *RED* (each packet also carries the previous frame, which roughly doubles the bitrate).
+  - Microphones also have AEC, AGC and noise suppression switches.
+  - Audio stats for both directions appear under the pipeline and in Stats: bitrate, loss, jitter, jitter buffer, and the share of audio the receiver had to invent ("concealed").
+- **Network impairment** (RECONNECT, then live): see [Network impairment](#network-impairment).
+- **Security** (RECONNECT): *End-to-end encryption* with a shared passphrase (AES-GCM frame encryption). The server forwards media it cannot read. Browser viewers opened from the app get the same key in their link. The pipeline shows whether the subscriber decrypts.
+
+The app remembers these settings and the view choices between launches. They are saved in `settings.json`, in the app's configuration folder, beside the server profiles. The E2EE passphrase is saved there in plain text, so use a test passphrase.
+
+## Network impairment
+
+*Route through impairment relay* sends both of the app's connections through a TURN relay running inside the app. The relay drops, delays and rate-limits packets. It needs no admin rights and changes nothing on the system. It works the same on macOS, Linux and Windows, and with any server, LiveKit Cloud included.
+
+- **Publisher uplink** shapes what the publisher sends to the server.
+- **Subscriber downlink** shapes what the server sends to the subscriber.
+
+Each direction has four settings, and you can change them live while connected:
+
+- **Loss:** random, in percent.
+- **Delay:** fixed delay, in ms.
+- **Jitter:** extra random delay up to this many ms. Packets stay in order.
+- **Rate:** a bottleneck in kbps. Packets queue behind it and are dropped once more than 300 ms of queue builds up.
+
+Feedback in the other direction (RTCP, NACK) is not impaired. While a direction is impaired, a line under the pipeline shows what passed and what was dropped.
+
+Things to try:
+- Uplink loss: watch the encoder step down.
+- A downlink rate cap with simulcast: the SFU switches to a lower layer.
+- A downlink rate cap with a single layer: the SFU has nothing lower to send, so video stalls.
+- RED on and off under audio loss: compare the concealed share.
 
 ## Pipeline cards
 
@@ -160,7 +192,7 @@ Under the previews, **Open in Chrome**, **Default browser** or **Copy link** ope
 
 This app's publisher cannot offer FlexFEC: the Rust SDK compiles in a fixed set of WebRTC field trials without it. To test the server's upstream FlexFEC (LiveKit 1.13.11 and later), **Publish from Chrome** starts a separate Chrome, on its own profile, with WebRTC's FlexFEC-03 field trials, and publishes a synthetic video with the panel's codec, size, frame rate, bitrate cap and layers. Unpublish first: the app then receives the Chrome stream.
 
-The app shows whether FlexFEC was negotiated, Chrome's encoder and frame rate, media and on-the-wire bitrate, RTX, and the server's FEC counters. Chrome sends FEC in proportion to the loss it sees, so test on a lossy link (macOS Network Link Conditioner, Linux `tc netem`) to see repairs. On the Local dev profile, *Turn it on* enables FlexFEC on the server if it is off.
+The app shows whether FlexFEC was negotiated, Chrome's encoder and frame rate, media and on-the-wire bitrate, RTX, and the server's FEC counters. Chrome sends FEC in proportion to the loss it sees, so test on a lossy link (macOS Network Link Conditioner, Linux `tc netem`) to see repairs. The app's own impairment relay does not shape Chrome's connection. On the Local dev profile, *Turn it on* enables FlexFEC on the server if it is off.
 
 In LiveKit 1.13.11, FlexFEC is publisher → SFU only; subscribers recover with NACK and RTX.
 
@@ -173,7 +205,15 @@ livekit-workbench --headless --codec vp9 --encoder sw --layers L3T3_KEY --second
 livekit-workbench --headless --help
 ```
 
-Headless mode publishes and receives without a window, prints one line of stats per second and exits 0 when video made the round trip. It connects to `LIVEKIT_URL` (default `ws://127.0.0.1:7880`) with `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` (default the dev key). Useful options: `--lifecycle` (unpublish, publish, republish, live source switch), `--ask 320x180` (a smaller layer arrives), `--detail-hint`, `--chrome-pub` (Chrome publisher with FlexFEC).
+Headless mode publishes and receives without a window, prints one line of stats per second and exits 0 when video made the round trip. It connects to `LIVEKIT_URL` (default `ws://127.0.0.1:7880`) with `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` (default the dev key). Useful options:
+
+- `--lifecycle`: unpublish, publish, republish, then a live source switch.
+- `--ask 320x180`: a smaller layer arrives.
+- `--detail-hint`
+- `--chrome-pub`: Chrome publisher with FlexFEC.
+- `--e2ee PASSPHRASE`
+- `--audio tone`: the run also fails if audio does not arrive. Add `--audio-kbps 24`, `--no-dtx` or `--no-red` to change the Opus settings.
+- `--up 5,40,10` and `--down 0,0,0,1000`: impairment as `LOSS%,DELAY,JITTER,KBPS`; trailing fields are optional.
 
 ## Troubleshooting
 

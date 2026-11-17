@@ -8,6 +8,7 @@ mod capture;
 mod codec_versions;
 mod headless;
 mod health;
+mod impair;
 mod local_server;
 mod profiles;
 mod server_update;

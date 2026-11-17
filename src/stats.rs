@@ -145,6 +145,8 @@ pub struct Snapshot {
     /// Which FEC is in use on the publisher connection: "FlexFEC", "ULPFEC", "RED".
     pub fec: Vec<String>,
     pub audio: AudioStats,
+    /// The in-app impairment relay, when connected through it.
+    pub impair: Option<ImpairStats>,
     /// Increments on every sample, so viewers can tell a new one arrived.
     pub seq: u64,
     pub history: History,
@@ -458,6 +460,25 @@ pub struct BrowserPublisher {
     pub nack: u64,
     pub pli: u64,
     pub limit: String,
+}
+
+/// One direction of the impairment relay over the last second.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct LinkStats {
+    pub settings: crate::impair::Impairment,
+    /// What left the relay.
+    pub kbps: f64,
+    pub dropped_random_pct: f64,
+    pub dropped_queue_pct: f64,
+    pub queue_ms: f64,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct ImpairStats {
+    /// Publisher to SFU.
+    pub up: LinkStats,
+    /// SFU to subscriber.
+    pub down: LinkStats,
 }
 
 /// The audio track in both directions, refreshed once a second.

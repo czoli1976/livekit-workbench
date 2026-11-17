@@ -16,6 +16,8 @@
 //!     --audio tone|MICROPHONE-NAME     also publish audio, and require it to arrive
 //!     --audio-kbps N                   Opus bitrate cap (default 32)
 //!     --no-dtx, --no-red               turn off Opus DTX or redundant audio
+//!     --up LOSS%,DELAY,JITTER,KBPS     impair the publisher's uplink (in-app relay)
+//!     --down LOSS%,DELAY,JITTER,KBPS   impair the subscriber's downlink
 //!     --lifecycle                      also exercise unpublish, publish, republish, switch source
 //!
 //! Connects with LIVEKIT_URL, LIVEKIT_API_KEY and LIVEKIT_API_SECRET, or the
@@ -31,6 +33,35 @@ use crate::capture::SourceKind;
 use crate::session::{
     AudioConfig, AudioInput, ConnectConfig, Layering, Phase, PublishConfig, Session,
 };
+
+/// "LOSS%,DELAY,JITTER,KBPS", trailing fields optional: "2" or "1,40,10,1500".
+/// A field that is given must be a valid number.
+fn parse_impairment(s: &str) -> Result<crate::impair::Impairment, String> {
+    let names = ["loss %", "delay ms", "jitter ms", "rate kbps"];
+    let mut v = [0.0f64; 4];
+    let fields: Vec<&str> = s.split(',').map(str::trim).collect();
+    if fields.len() > 4 {
+        return Err(format!(
+            "\"{s}\": at most 4 fields, LOSS%,DELAY,JITTER,KBPS"
+        ));
+    }
+    for (i, f) in fields.iter().enumerate() {
+        v[i] = f
+            .parse::<f64>()
+            .ok()
+            .filter(|x| x.is_finite() && *x >= 0.0)
+            .ok_or_else(|| format!("\"{s}\": {} must be a number ≥ 0, got \"{f}\"", names[i]))?;
+    }
+    if v[0] > 100.0 {
+        return Err(format!("\"{s}\": loss must be at most 100 %"));
+    }
+    Ok(crate::impair::Impairment {
+        loss_pct: v[0] as f32,
+        delay_ms: v[1] as u32,
+        jitter_ms: v[2] as u32,
+        rate_kbps: v[3] as u32,
+    })
+}
 
 fn opt<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
     args.iter()
@@ -86,6 +117,14 @@ fn line(s: &Session, sec: u64) -> (u32, f64) {
             }
         }
     }
+    if let Some(i) = &snap.impair {
+        for (name, l) in [("up", &i.up), ("down", &i.down)] {
+            println!(
+                "      relay {name}: {:.0} kbps out, dropped {:.1}% random + {:.1}% queue, queue {:.0} ms",
+                l.kbps, l.dropped_random_pct, l.dropped_queue_pct, l.queue_ms
+            );
+        }
+    }
     let a = &snap.audio;
     if !a.source.is_empty() || a.receiving {
         println!(
@@ -136,6 +175,7 @@ fn chrome_pub(
             decode: true,
             preview: false,
             e2ee_key: None,
+            impair: false,
         },
         None,
     );
@@ -308,6 +348,22 @@ pub fn run(args: &[String]) -> i32 {
             ..Default::default()
         },
     };
+    let parsed = (
+        opt(args, "--up").map(parse_impairment).transpose(),
+        opt(args, "--down").map(parse_impairment).transpose(),
+    );
+    let (impair_up, impair_down) = match parsed {
+        (Ok(u), Ok(d)) => (u, d),
+        (Err(e), _) | (_, Err(e)) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    };
+    {
+        let links = session.shared.lock().links.clone();
+        *links.up.settings.lock() = impair_up.unwrap_or_default();
+        *links.down.settings.lock() = impair_down.unwrap_or_default();
+    }
     // The passphrase: LIVEKIT_E2EE_KEY keeps it out of process listings and
     // shell history; --e2ee still works for quick tests.
     let e2ee_key = std::env::var("LIVEKIT_E2EE_KEY")
@@ -347,6 +403,7 @@ pub fn run(args: &[String]) -> i32 {
             decode: true,
             preview: false,
             e2ee_key: e2ee_key.clone(),
+            impair: impair_up.is_some() || impair_down.is_some(),
         },
         Some(publish.clone()),
     );
@@ -476,5 +533,22 @@ pub fn run(args: &[String]) -> i32 {
     } else {
         println!("RESULT: FAILED (received video: {received})");
         1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_impairment;
+
+    #[test]
+    fn impairment_fields() {
+        let i = parse_impairment("2").unwrap();
+        assert_eq!((i.loss_pct, i.delay_ms, i.rate_kbps), (2.0, 0, 0));
+        let i = parse_impairment("1, 40,10,1500").unwrap();
+        assert_eq!((i.delay_ms, i.jitter_ms, i.rate_kbps), (40, 10, 1500));
+        assert!(parse_impairment("0,0,0,1O00").is_err());
+        assert!(parse_impairment("0,,5").is_err());
+        assert!(parse_impairment("-1").is_err());
+        assert!(parse_impairment("1,2,3,4,5").is_err());
     }
 }
