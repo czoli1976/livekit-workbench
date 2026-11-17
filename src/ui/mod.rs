@@ -28,7 +28,8 @@ use pipeline::{ChartMetric, PreviewLayout, PreviewPane, SubAsk};
 use stats_window::StatsUi;
 
 /// Camera formats listed in the background: (camera index, formats or error).
-type FormatsResult = (u32, Result<Vec<CameraFormat>, String>);
+/// Camera formats listed in the background: (request number, formats or error).
+type FormatsResult = (u64, Result<Vec<CameraFormat>, String>);
 
 pub struct App {
     rt: tokio::runtime::Runtime,
@@ -51,6 +52,8 @@ pub struct App {
     camera_formats: Vec<CameraFormat>,
     formats_for: Option<u32>,
     formats_pending: Arc<Mutex<Option<FormatsResult>>>,
+    /// Numbers each format request, so a late answer to an older one is ignored.
+    formats_generation: u64,
     formats_retry: Instant,
     /// The source last sent to the engine's preview-only capture.
     preview_sent: Option<session::PublishConfig>,
@@ -139,6 +142,7 @@ impl App {
             camera_formats: Vec::new(),
             formats_for: None,
             formats_pending: Default::default(),
+            formats_generation: 0,
             formats_retry: Instant::now(),
             preview_sent: None,
             preview_seq: (0, Instant::now()),
@@ -258,20 +262,29 @@ impl App {
         if self.formats_for != Some(index) {
             self.formats_for = Some(index);
             self.camera_formats.clear();
+            self.formats_generation += 1;
+            let generation = self.formats_generation;
             let slot = self.formats_pending.clone();
             *slot.lock() = None;
             std::thread::spawn(move || {
                 let r = capture::camera_formats(index).map_err(|e| format!("{e:#}"));
-                *slot.lock() = Some((index, r));
+                let mut s = slot.lock();
+                // Never let an older request overwrite a newer answer.
+                if s.as_ref().is_none_or(|(g, _)| *g <= generation) {
+                    *s = Some((generation, r));
+                }
             });
         }
-        let ready = self.formats_pending.lock().take();
-        let Some((for_index, result)) = ready else {
+        let ready = {
+            let mut s = self.formats_pending.lock();
+            match s.as_ref() {
+                Some((g, _)) if *g == self.formats_generation => s.take(),
+                _ => None,
+            }
+        };
+        let Some((_, result)) = ready else {
             return;
         };
-        if Some(for_index) != self.formats_for {
-            return;
-        }
         match result {
             Ok(mut f) => {
                 self.camera_error = None;

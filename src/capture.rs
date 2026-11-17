@@ -529,14 +529,20 @@ pub fn camera_test() -> i32 {
         say(format!("capture ended: {r:?} after {n} frames"));
         say("done".into());
     });
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut failed = false;
     loop {
-        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        // 20 s from the last progress line, not from the start.
+        match rx.recv_timeout(Duration::from_secs(20)) {
             Ok(line) => {
                 println!("{line}");
-                if line.ends_with("done") || line.contains("failed") || line.ends_with("no camera")
+                if line.contains("failed") || line.contains("Err(") || line.ends_with("no camera") {
+                    failed = true;
+                }
+                if line.ends_with("done")
+                    || line.contains(" failed:")
+                    || line.ends_with("no camera")
                 {
-                    return 0;
+                    return i32::from(failed);
                 }
             }
             Err(_) => {
