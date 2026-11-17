@@ -152,6 +152,11 @@ fn run_synthetic(
     }
 }
 
+/// Camera threads that had not finished when their capture ended, by camera.
+static CAMERA_WORKERS: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashMap<u32, std::thread::JoinHandle<()>>>,
+> = std::sync::LazyLock::new(Default::default);
+
 enum CamMsg {
     Info(CaptureInfo),
     Frame(I420Buffer),
@@ -199,6 +204,19 @@ fn run_camera(
     use std::sync::mpsc::{sync_channel, RecvTimeoutError};
     use std::sync::Arc;
     camera_access()?;
+    // At most one camera thread per camera: one stuck inside the OS stays
+    // registered until it exits, and no other is started for that camera.
+    {
+        let mut workers = CAMERA_WORKERS.lock();
+        if let Some(h) = workers.get(&index) {
+            if !h.is_finished() {
+                return Err(anyhow!(
+                    "the camera has not been released by its previous use yet; try again in a moment"
+                ));
+            }
+            workers.remove(&index);
+        }
+    }
     let inner_stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = sync_channel::<CamMsg>(2);
     let camera_thread = {
@@ -254,6 +272,9 @@ fn run_camera(
     let released = Instant::now();
     while !camera_thread.is_finished() && released.elapsed() < Duration::from_secs(2) {
         std::thread::sleep(Duration::from_millis(20));
+    }
+    if !camera_thread.is_finished() {
+        CAMERA_WORKERS.lock().insert(index, camera_thread);
     }
     result
 }

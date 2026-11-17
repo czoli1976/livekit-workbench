@@ -1038,6 +1038,10 @@ impl eframe::App for App {
         let seq = self.session.shared.lock().local_preview.lock().seq;
         if seq != self.preview_seq.0 {
             self.preview_seq = (seq, Instant::now());
+            // Frames from the camera are arriving now: any access error is stale.
+            if matches!(self.form.source, SourceKind::Camera(_)) {
+                self.camera_error = None;
+            }
         } else if want.is_some()
             && self.session.phase() != Phase::Publishing
             && self.preview_seq.1.elapsed() > Duration::from_secs(3)
@@ -1048,12 +1052,6 @@ impl eframe::App for App {
         if want != self.preview_sent {
             self.session.set_preview(want.clone());
             self.preview_sent = want;
-        }
-        if self.camera_error.is_some() {
-            let note = self.session.shared.lock().snapshot.capture.note.clone();
-            if note.starts_with("camera") {
-                self.camera_error = None;
-            }
         }
         // WB_TEST_PENDING=1: make one republish change once publishing (checks).
         if self.session.phase() == Phase::Publishing

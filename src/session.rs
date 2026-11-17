@@ -141,6 +141,8 @@ pub struct Shared {
     pub remote_preview: SharedPreview,
     /// Connections still closing in the background after a disconnect.
     pub closing: Arc<std::sync::atomic::AtomicUsize>,
+    /// Why the preview-only capture failed, cleared by its first frame.
+    pub preview_error: Option<String>,
 }
 
 enum Command {
@@ -394,7 +396,19 @@ impl Engine {
             Command::SwitchSource(p) => self.switch_source(p).await,
             Command::SetPreview(cfg) => {
                 let running = self.standby.as_ref().is_some_and(|(_, t)| !t.is_finished());
-                if cfg == self.standby_cfg && (cfg.is_none() || running) {
+                // The preview uses only the capture settings: a change to codec,
+                // bitrate or layers must not reopen the source.
+                let same_capture = match (&cfg, &self.standby_cfg) {
+                    (Some(a), Some(b)) => {
+                        a.source == b.source
+                            && (a.capture_w, a.capture_h, a.fps)
+                                == (b.capture_w, b.capture_h, b.fps)
+                    }
+                    (None, None) => true,
+                    _ => false,
+                };
+                if same_capture && (cfg.is_none() || running) {
+                    self.standby_cfg = cfg;
                     return;
                 }
                 self.stop_standby().await;
@@ -418,6 +432,7 @@ impl Engine {
         };
         let stop = Arc::new(AtomicBool::new(false));
         let shared = self.shared.clone();
+        let repaint = self.repaint.clone();
         let preview = shared.lock().local_preview.clone();
         let flag = stop.clone();
         let spawned = std::thread::Builder::new()
@@ -440,11 +455,17 @@ impl Engine {
                         if last.elapsed() >= PREVIEW_INTERVAL {
                             last = Instant::now();
                             write_preview(&preview, &mut buf);
+                            let mut s = shared.lock();
+                            if s.preview_error.is_some() {
+                                s.preview_error = None;
+                            }
                         }
                     },
                 );
                 if let Err(e) = result {
                     log::info!("preview capture: {e:#}");
+                    shared.lock().preview_error = Some(format!("{e:#}"));
+                    (repaint)();
                 }
             });
         match spawned {
