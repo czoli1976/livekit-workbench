@@ -151,6 +151,8 @@ enum Command {
     Disconnect,
     RequestSize(Option<(u32, u32)>),
     SwitchSource(PublishConfig),
+    /// The source to show in the local preview while not publishing (None: off).
+    SetPreview(Option<PublishConfig>),
 }
 
 /// The UI's handle to the engine.
@@ -193,6 +195,11 @@ impl Session {
     }
     /// Change the input or capture format without republishing. Frames are
     /// scaled to the size the track was published with.
+    /// Show this source in the local preview whenever nothing is being
+    /// published. The engine hands the source over to the publisher.
+    pub fn set_preview(&self, cfg: Option<PublishConfig>) {
+        let _ = self.tx.send(Command::SetPreview(cfg));
+    }
     pub fn switch_source(&self, cfg: PublishConfig) {
         let _ = self.tx.send(Command::SwitchSource(cfg));
     }
@@ -294,6 +301,9 @@ struct Engine {
     shared: Arc<Mutex<Shared>>,
     repaint: Arc<dyn Fn() + Send + Sync>,
     conn: Option<Connection>,
+    /// Preview-only capture while not publishing.
+    standby_cfg: Option<PublishConfig>,
+    standby: Option<(Arc<AtomicBool>, std::thread::JoinHandle<()>)>,
 }
 
 impl Engine {
@@ -302,6 +312,8 @@ impl Engine {
             shared,
             repaint,
             conn: None,
+            standby_cfg: None,
+            standby: None,
         }
     }
 
@@ -380,6 +392,77 @@ impl Engine {
             Command::Disconnect => self.disconnect().await,
             Command::RequestSize(size) => self.request_size(size),
             Command::SwitchSource(p) => self.switch_source(p).await,
+            Command::SetPreview(cfg) => {
+                let running = self.standby.as_ref().is_some_and(|(_, t)| !t.is_finished());
+                if cfg == self.standby_cfg && (cfg.is_none() || running) {
+                    return;
+                }
+                self.stop_standby().await;
+                self.standby_cfg = cfg;
+                self.start_standby();
+            }
+        }
+    }
+
+    fn publishing(&self) -> bool {
+        self.conn.as_ref().is_some_and(|c| c.published.is_some())
+    }
+
+    /// Start the preview-only capture if a source is set and nothing is published.
+    fn start_standby(&mut self) {
+        if self.standby.is_some() || self.publishing() {
+            return;
+        }
+        let Some(cfg) = self.standby_cfg.clone() else {
+            return;
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let shared = self.shared.clone();
+        let preview = shared.lock().local_preview.clone();
+        let flag = stop.clone();
+        let spawned = std::thread::Builder::new()
+            .name("preview".into())
+            .spawn(move || {
+                let mut last = Instant::now() - PREVIEW_INTERVAL;
+                let result = capture::run(
+                    &cfg.source,
+                    cfg.capture_w,
+                    cfg.capture_h,
+                    cfg.fps,
+                    &flag,
+                    |i| {
+                        let mut s = shared.lock();
+                        s.snapshot.capture.width = i.width;
+                        s.snapshot.capture.height = i.height;
+                        s.snapshot.capture.note = i.note;
+                    },
+                    |mut buf| {
+                        if last.elapsed() >= PREVIEW_INTERVAL {
+                            last = Instant::now();
+                            write_preview(&preview, &mut buf);
+                        }
+                    },
+                );
+                if let Err(e) = result {
+                    log::info!("preview capture: {e:#}");
+                }
+            });
+        match spawned {
+            Ok(t) => self.standby = Some((stop, t)),
+            Err(e) => log::warn!("preview capture: {e}"),
+        }
+    }
+
+    /// Stop the preview-only capture (before publishing opens the source).
+    async fn stop_standby(&mut self) {
+        if let Some((stop, t)) = self.standby.take() {
+            stop.store(true, Ordering::SeqCst);
+            let _ = tokio::time::timeout(
+                Duration::from_secs(3),
+                tokio::task::spawn_blocking(move || t.join()),
+            )
+            .await;
+            clear_preview(&self.shared.lock().local_preview);
         }
     }
 
@@ -456,6 +539,11 @@ impl Engine {
         if conn.published.is_some() {
             return;
         }
+        // The preview-only capture holds the source (a camera opens once).
+        self.stop_standby().await;
+        let Some(conn) = self.conn.as_mut() else {
+            return;
+        };
         let (pub_w, pub_h) = cfg.publish_dims();
         let source = NativeVideoSource::new(
             VideoResolution {
@@ -644,6 +732,7 @@ impl Engine {
         }
         self.event("Unpublished");
         self.set_phase(Phase::Connected);
+        self.start_standby();
     }
 
     async fn disconnect(&mut self) {
@@ -709,6 +798,7 @@ impl Engine {
         }
         self.event("Disconnected");
         self.set_phase(Phase::Disconnected);
+        self.start_standby();
     }
 
     async fn on_connection_lost(&mut self, why: &str) {

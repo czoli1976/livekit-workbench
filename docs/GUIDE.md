@@ -66,7 +66,7 @@ The app was tested with SDK 0.11.0; *About* shows the exact versions it was buil
 ## First run
 
 1. Start the app. With the **Local dev** profile it starts `livekit-server` itself; the status line at the bottom shows *Local server running*, its version, and *✓ latest* once it has checked LiveKit's releases.
-2. Leave the input on **Synthetic: detailed motion** (no camera needed) and press **Connect**. With *Auto-publish on connect* on, the app connects, publishes and receives its own video back through the server.
+2. The input starts on your camera (the first one the system lists; on macOS allow camera access when asked). Without a camera it starts on **Synthetic: detailed motion**, which needs none. Press **Connect**. With *Auto-publish on connect* on, the app connects, publishes and receives its own video back through the server.
 3. The previews show what goes into the encoder and what comes back decoded; the five cards below follow each stage.
 
 ![Main window, publishing H.264 simulcast](screenshots/main.png)

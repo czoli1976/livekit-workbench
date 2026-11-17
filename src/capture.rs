@@ -201,7 +201,7 @@ fn run_camera(
     camera_access()?;
     let inner_stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = sync_channel::<CamMsg>(2);
-    {
+    let camera_thread = {
         let inner_stop = inner_stop.clone();
         std::thread::Builder::new()
             .name("camera".into())
@@ -210,8 +210,8 @@ fn run_camera(
                     let _ = tx.send(CamMsg::Failed(format!("{e:#}")));
                 }
             })
-            .map_err(|e| anyhow!("starting the camera thread: {e}"))?;
-    }
+            .map_err(|e| anyhow!("starting the camera thread: {e}"))?
+    };
     let mut on_info = Some(on_info);
     let mut opened = Instant::now();
     let mut last_frame: Option<Instant> = None;
@@ -246,9 +246,15 @@ fn run_camera(
             Err(RecvTimeoutError::Disconnected) => break Ok(()),
         }
     };
-    // Tell the camera thread to stop; it may be stuck inside the OS, so do not
-    // wait for it. It ends, and releases the camera, when the OS returns.
+    // Tell the camera thread to stop and give it up to 2 s to release the
+    // camera, so the next user (preview to publisher) can open it. If it is
+    // stuck inside the OS, do not wait longer: it ends when the OS returns.
     inner_stop.store(true, Ordering::SeqCst);
+    drop(rx);
+    let released = Instant::now();
+    while !camera_thread.is_finished() && released.elapsed() < Duration::from_secs(2) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
     result
 }
 
