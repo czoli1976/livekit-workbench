@@ -12,6 +12,7 @@ use super::pipeline::{ChartMetric, PreviewLayout, SubAsk};
 use super::App;
 use crate::capabilities::EncoderChoice;
 use crate::capture::SourceKind;
+use crate::session::AudioInput;
 
 /// Everything as plain strings and numbers, so a newer or older app version
 /// can read the file and fall back field by field.
@@ -41,6 +42,14 @@ pub struct Saved {
     pub e2ee: Option<bool>,
     /// A test passphrase, stored in plain text.
     pub e2ee_key: Option<String>,
+    /// "off", "tone" or "mic:<name>".
+    pub audio: String,
+    pub audio_kbps: u64,
+    pub audio_dtx: Option<bool>,
+    pub audio_red: Option<bool>,
+    pub audio_aec: Option<bool>,
+    pub audio_agc: Option<bool>,
+    pub audio_ns: Option<bool>,
 }
 
 fn path() -> Option<PathBuf> {
@@ -126,6 +135,17 @@ impl App {
             sub_ask: format!("{:?}", self.sub_ask).to_lowercase(),
             e2ee: Some(self.e2ee_on),
             e2ee_key: Some(self.e2ee_key.clone()),
+            audio: match &f.audio.input {
+                AudioInput::Off => "off".into(),
+                AudioInput::Tone => "tone".into(),
+                AudioInput::Microphone(n) => format!("mic:{n}"),
+            },
+            audio_kbps: f.audio.bitrate_bps / 1000,
+            audio_dtx: Some(f.audio.dtx),
+            audio_red: Some(f.audio.red),
+            audio_aec: Some(f.audio.echo_cancellation),
+            audio_agc: Some(f.audio.auto_gain),
+            audio_ns: Some(f.audio.noise_suppression),
         }
     }
 
@@ -206,6 +226,26 @@ impl App {
         }
         if let Some(k) = s.e2ee_key.as_ref().filter(|k| !k.is_empty()) {
             self.e2ee_key = k.clone();
+        }
+        let a = &mut self.form.audio;
+        a.input = match s.audio.as_str() {
+            "tone" => AudioInput::Tone,
+            m if m.starts_with("mic:") => AudioInput::Microphone(m[4..].to_string()),
+            _ => AudioInput::Off,
+        };
+        if s.audio_kbps > 0 {
+            a.bitrate_bps = s.audio_kbps * 1000;
+        }
+        for (slot, v) in [
+            (&mut a.dtx, s.audio_dtx),
+            (&mut a.red, s.audio_red),
+            (&mut a.echo_cancellation, s.audio_aec),
+            (&mut a.auto_gain, s.audio_agc),
+            (&mut a.noise_suppression, s.audio_ns),
+        ] {
+            if let Some(v) = v {
+                *slot = v;
+            }
         }
         self.sanitize_form();
     }

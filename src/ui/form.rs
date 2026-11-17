@@ -7,7 +7,7 @@ use super::widgets::{self, live_badge, republish_badge, section};
 use super::App;
 use crate::capabilities::{codec_name, codec_supports_svc, EncoderChoice, ALL_CODECS, SVC_MODES};
 use crate::capture::SourceKind;
-use crate::session::{Layering, Phase, PublishConfig};
+use crate::session::{AudioConfig, AudioInput, Layering, Phase, PublishConfig};
 
 /// What the content hint does, read from WebRTC m150 and LiveKit's fork.
 /// The SDK has no public contentHint setter, so the app sets the source's
@@ -58,7 +58,10 @@ pub struct PublishForm {
     pub degradation: DegradationPreference,
     pub screen_share: bool,
     pub detail_hint: bool,
+    pub audio: AudioConfig,
 }
+
+const AUDIO_BITRATES: [u64; 6] = [16_000, 24_000, 32_000, 48_000, 64_000, 128_000];
 
 impl Default for PublishForm {
     fn default() -> Self {
@@ -76,6 +79,7 @@ impl Default for PublishForm {
             degradation: DegradationPreference::Balanced,
             screen_share: false,
             detail_hint: false,
+            audio: AudioConfig::default(),
         }
     }
 }
@@ -100,6 +104,7 @@ impl PublishForm {
             },
             screen_share: self.screen_share,
             detail_hint: self.detail_hint,
+            audio: self.audio.clone(),
         }
     }
 }
@@ -129,6 +134,7 @@ pub fn diff(active: &PublishConfig, want: &PublishConfig) -> Pending {
     r(active.degradation != want.degradation, "when constrained");
     r(active.screen_share != want.screen_share, "track source");
     r(active.detail_hint != want.detail_hint, "content hint");
+    r(active.audio != want.audio, "audio");
     p.live = (active.source != want.source
         || (active.capture_w, active.capture_h) != (want.capture_w, want.capture_h)
         || active.fps != want.fps)
@@ -611,6 +617,10 @@ impl App {
         );
 
         ui.separator();
+        // ---- Audio
+        self.audio_section(ui);
+
+        ui.separator();
         // ---- Security
         section(ui, "Security");
         let connected = phase != Phase::Disconnected;
@@ -649,6 +659,80 @@ impl App {
                     self.session.switch_source(want);
                 }
             }
+        }
+    }
+
+    fn audio_section(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            section(ui, "Audio");
+            republish_badge(ui);
+        });
+        let a = &mut self.form.audio;
+        let mics = &mut self.microphones;
+        egui::Grid::new("audio-grid")
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                ui.label("Input");
+                egui::ComboBox::from_id_salt("audio-input")
+                    .selected_text(a.input.label())
+                    .width(190.0)
+                    .show_ui(ui, |ui| {
+                        // Listing opens the platform audio device, so only on demand.
+                        let list = mics.get_or_insert_with(crate::session::microphones);
+                        ui.selectable_value(&mut a.input, AudioInput::Off, "Off");
+                        ui.selectable_value(&mut a.input, AudioInput::Tone, "Synthetic tone")
+                            .on_hover_text("A 440 Hz beep, 0.6 s on and 0.4 s off. Needs no microphone and plays nothing here.");
+                        for name in list.iter() {
+                            ui.selectable_value(
+                                &mut a.input,
+                                AudioInput::Microphone(name.clone()),
+                                format!("🎤 {name}"),
+                            );
+                        }
+                    });
+                ui.end_row();
+                if a.input == AudioInput::Off {
+                    return;
+                }
+                ui.label("Opus bitrate");
+                egui::ComboBox::from_id_salt("audio-bitrate")
+                    .selected_text(format!("{} kbps", a.bitrate_bps / 1000))
+                    .show_ui(ui, |ui| {
+                        for b in AUDIO_BITRATES {
+                            ui.selectable_value(&mut a.bitrate_bps, b, format!("{} kbps", b / 1000));
+                        }
+                    });
+                ui.end_row();
+                ui.label("Resilience");
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut a.dtx, "DTX").on_hover_text(
+                        "Discontinuous transmission: Opus sends almost nothing during silence.",
+                    );
+                    ui.checkbox(&mut a.red, "RED").on_hover_text(
+                        "Redundant audio (RFC 2198): each packet also carries the previous frame, so one lost packet costs no audio. Roughly doubles the bitrate.",
+                    );
+                });
+                ui.end_row();
+                if matches!(a.input, AudioInput::Microphone(_)) {
+                    ui.label("Processing");
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut a.echo_cancellation, "AEC")
+                            .on_hover_text("Echo cancellation");
+                        ui.checkbox(&mut a.auto_gain, "AGC")
+                            .on_hover_text("Automatic gain control");
+                        ui.checkbox(&mut a.noise_suppression, "NS")
+                            .on_hover_text("Noise suppression");
+                    });
+                    ui.end_row();
+                }
+            });
+        if matches!(a.input, AudioInput::Microphone(_)) {
+            ui.label(
+                RichText::new("The app also receives its own audio and plays it, about a round trip late. Use headphones, or keep echo cancellation on.")
+                    .small()
+                    .color(widgets::amber(ui)),
+            );
         }
     }
 
@@ -708,6 +792,7 @@ impl App {
         f.degradation = a.degradation;
         f.screen_share = a.screen_share;
         f.detail_hint = a.detail_hint;
+        f.audio = a.audio.clone();
         f.publish_size = a.publish_size;
         match &a.layering {
             Layering::Single => f.layers = LayerKind::Single,

@@ -144,6 +144,7 @@ pub struct Snapshot {
     pub fec_negotiated: bool,
     /// Which FEC is in use on the publisher connection: "FlexFEC", "ULPFEC", "RED".
     pub fec: Vec<String>,
+    pub audio: AudioStats,
     /// Increments on every sample, so viewers can tell a new one arrived.
     pub seq: u64,
     pub history: History,
@@ -459,6 +460,159 @@ pub struct BrowserPublisher {
     pub limit: String,
 }
 
+/// The audio track in both directions, refreshed once a second.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct AudioStats {
+    /// "Synthetic tone" or the microphone's name; empty when no audio is published.
+    pub source: String,
+    pub send_codec: String,
+    pub send_kbps: f64,
+    /// Input level 0..1 at the sender (WebRTC's audioLevel).
+    pub send_level: f64,
+    /// Loss and round trip the server reports back for our audio (RTCP).
+    pub server_loss: f64,
+    pub rtt_ms: f64,
+    /// Echo cancellation's effect on the microphone, in dB (0 when unknown).
+    pub echo_return_loss_db: f64,
+    pub receiving: bool,
+    pub recv_codec: String,
+    pub recv_kbps: f64,
+    pub recv_level: f64,
+    pub loss_ratio: f64,
+    pub lost: i64,
+    pub jitter_ms: f64,
+    pub jitter_buffer_ms: f64,
+    /// Share of played samples that NetEq invented to hide gaps, last second.
+    pub concealed_pct: f64,
+    pub concealment_events: u64,
+    pub fec_packets: u64,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct RawAudioOut {
+    pub bytes: u64,
+    pub codec: String,
+    pub level: f64,
+    pub fraction_lost: f64,
+    pub rtt_s: f64,
+    pub echo_return_loss: f64,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct RawAudioIn {
+    pub bytes: u64,
+    pub packets: u64,
+    pub lost: i64,
+    pub jitter_s: f64,
+    pub jitter_delay: f64,
+    pub jitter_emitted: u64,
+    pub samples: u64,
+    pub concealed: u64,
+    pub concealment_events: u64,
+    pub level: f64,
+    pub fec: u64,
+    pub codec: String,
+}
+
+pub fn audio_outbound(stats: &[RtcStats]) -> Option<RawAudioOut> {
+    let mut out: Option<RawAudioOut> = None;
+    for s in stats {
+        if let RtcStats::OutboundRtp(o) = s {
+            if o.stream.kind == "audio" {
+                let r = out.get_or_insert_with(Default::default);
+                r.bytes += o.sent.bytes_sent;
+                r.codec = codec_label(stats, &o.stream.codec_id);
+            }
+        }
+    }
+    let r = out.as_mut()?;
+    for s in stats {
+        match s {
+            RtcStats::RemoteInboundRtp(ri) if ri.stream.kind == "audio" => {
+                r.fraction_lost = ri.remote_inbound.fraction_lost;
+                r.rtt_s = ri.remote_inbound.round_trip_time;
+            }
+            RtcStats::MediaSource(m) if m.source.kind == "audio" => {
+                r.level = m.audio.audio_level;
+                r.echo_return_loss = m.audio.echo_return_loss;
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+pub fn audio_inbound(stats: &[RtcStats]) -> Option<RawAudioIn> {
+    stats.iter().find_map(|s| {
+        let RtcStats::InboundRtp(i) = s else {
+            return None;
+        };
+        if i.stream.kind != "audio" {
+            return None;
+        }
+        Some(RawAudioIn {
+            bytes: i.inbound.bytes_received,
+            packets: i.received.packets_received,
+            lost: i.received.packets_lost,
+            jitter_s: i.received.jitter,
+            jitter_delay: i.inbound.jitter_buffer_delay,
+            jitter_emitted: i.inbound.jitter_buffer_emitted_count,
+            samples: i.inbound.total_samples_received,
+            concealed: i.inbound.concealed_samples,
+            concealment_events: i.inbound.concealment_events,
+            level: i.inbound.audio_level,
+            fec: i.inbound.fec_packets_received,
+            codec: codec_label(stats, &i.stream.codec_id),
+        })
+    })
+}
+
+/// Turn two samples of raw audio counters into rates for the UI.
+pub fn audio_rates(
+    out: Option<(&RawAudioOut, Option<&RawAudioOut>)>,
+    inn: Option<(&RawAudioIn, Option<&RawAudioIn>)>,
+    dt: f64,
+) -> AudioStats {
+    let mut a = AudioStats::default();
+    if let Some((o, prev)) = out {
+        a.send_codec = o.codec.clone();
+        a.send_kbps = prev
+            .map(|p| rate_mbps(o.bytes, p.bytes, dt) * 1000.0)
+            .unwrap_or(0.0);
+        a.send_level = o.level;
+        a.server_loss = o.fraction_lost;
+        a.rtt_ms = o.rtt_s * 1000.0;
+        a.echo_return_loss_db = o.echo_return_loss;
+    }
+    if let Some((i, prev)) = inn {
+        a.receiving = true;
+        a.recv_codec = i.codec.clone();
+        a.recv_level = i.level;
+        a.lost = i.lost;
+        a.jitter_ms = i.jitter_s * 1000.0;
+        a.concealment_events = i.concealment_events;
+        a.fec_packets = i.fec;
+        if let Some(p) = prev {
+            a.recv_kbps = rate_mbps(i.bytes, p.bytes, dt) * 1000.0;
+            let packets = i.packets.saturating_sub(p.packets) as f64;
+            let lost = (i.lost - p.lost).max(0) as f64;
+            if packets + lost > 0.0 {
+                a.loss_ratio = lost / (packets + lost);
+            }
+            let emitted = i.jitter_emitted.saturating_sub(p.jitter_emitted);
+            if emitted > 0 {
+                a.jitter_buffer_ms = (i.jitter_delay - p.jitter_delay) * 1000.0 / emitted as f64;
+            }
+            let samples = i.samples.saturating_sub(p.samples);
+            if samples > 0 {
+                a.concealed_pct =
+                    i.concealed.saturating_sub(p.concealed) as f64 * 100.0 / samples as f64;
+            }
+        }
+    }
+    a
+}
+
 pub fn rate_mbps(now: u64, before: u64, dt: f64) -> f64 {
     now.saturating_sub(before) as f64 * 8.0 / dt.max(1e-3) / 1e6
 }
@@ -466,6 +620,35 @@ pub fn rate_mbps(now: u64, before: u64, dt: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_rates_from_two_samples() {
+        let before = RawAudioIn {
+            bytes: 0,
+            packets: 0,
+            samples: 0,
+            ..Default::default()
+        };
+        let now = RawAudioIn {
+            bytes: 4000,
+            packets: 48,
+            lost: 2,
+            jitter_delay: 2880.0,
+            jitter_emitted: 48_000,
+            samples: 48_000,
+            concealed: 960,
+            ..Default::default()
+        };
+        let a = audio_rates(None, Some((&now, Some(&before))), 1.0);
+        assert!((a.recv_kbps - 32.0).abs() < 1e-9);
+        assert!((a.loss_ratio - 0.04).abs() < 1e-9);
+        assert!((a.jitter_buffer_ms - 60.0).abs() < 1e-9);
+        assert!((a.concealed_pct - 2.0).abs() < 1e-9);
+        assert!(a.receiving);
+        // The first sample has no rates yet.
+        let first = audio_rates(None, Some((&now, None)), 1.0);
+        assert_eq!(first.recv_kbps, 0.0);
+    }
 
     #[test]
     fn platform_codec_names() {

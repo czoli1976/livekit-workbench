@@ -13,9 +13,13 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
 use livekit::options::{
-    compute_video_encodings, DegradationPreference, TrackPublishOptions, VideoCodec, VideoEncoding,
+    compute_video_encodings, AudioEncoding, DegradationPreference, TrackPublishOptions, VideoCodec,
+    VideoEncoding,
 };
 use livekit::prelude::*;
+use livekit::webrtc::audio_frame::AudioFrame;
+use livekit::webrtc::audio_source::native::NativeAudioSource;
+use livekit::webrtc::audio_source::{AudioSourceOptions, RtcAudioSource};
 use livekit::webrtc::native::yuv_helper;
 use livekit::webrtc::video_frame::{I420Buffer, VideoBuffer, VideoFrame, VideoRotation};
 use livekit::webrtc::video_source::native::NativeVideoSource;
@@ -28,7 +32,9 @@ use tokio::sync::mpsc;
 use crate::capabilities::EncoderChoice;
 use crate::capture::{self, CaptureInfo, SourceKind};
 use crate::health::{self, HealthInput};
-use crate::stats::{self, push, LayerRow, RawIn, RawOut, ReceiveRow, Snapshot};
+use crate::stats::{
+    self, push, LayerRow, RawAudioIn, RawAudioOut, RawIn, RawOut, ReceiveRow, Snapshot,
+};
 
 pub const VIEWER_STATS_TOPIC: &str = "workbench.viewer-stats";
 pub const PUBLISHER_STATS_TOPIC: &str = "workbench.publisher-stats";
@@ -105,6 +111,68 @@ pub enum Layering {
     Svc(String),
 }
 
+/// Where the published audio comes from.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum AudioInput {
+    #[default]
+    Off,
+    /// A generated beep: needs no microphone and plays nothing locally.
+    Tone,
+    /// A microphone by device name, through the SDK's platform audio. Received
+    /// audio then plays through the speakers too.
+    Microphone(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AudioConfig {
+    pub input: AudioInput,
+    /// Opus maximum bitrate.
+    pub bitrate_bps: u64,
+    /// Opus discontinuous transmission: send almost nothing during silence.
+    pub dtx: bool,
+    /// Redundant audio: each packet also carries the previous frames.
+    pub red: bool,
+    /// Microphone processing (WebRTC's audio processing module).
+    pub echo_cancellation: bool,
+    pub auto_gain: bool,
+    pub noise_suppression: bool,
+}
+
+impl Default for AudioConfig {
+    fn default() -> Self {
+        Self {
+            input: AudioInput::Off,
+            bitrate_bps: 32_000,
+            dtx: true,
+            red: true,
+            echo_cancellation: true,
+            auto_gain: true,
+            noise_suppression: true,
+        }
+    }
+}
+
+impl AudioInput {
+    pub fn label(&self) -> String {
+        match self {
+            AudioInput::Off => "Off".into(),
+            AudioInput::Tone => "Synthetic tone".into(),
+            AudioInput::Microphone(name) => name.clone(),
+        }
+    }
+}
+
+/// The microphones the SDK's platform audio can open.
+pub fn microphones() -> Vec<String> {
+    match PlatformAudio::new() {
+        Ok(a) => a.recording_devices().map(|d| d.name).collect(),
+        Err(e) => {
+            log::warn!("listing microphones: {e}");
+            Vec::new()
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct PublishConfig {
     pub source: SourceKind,
@@ -124,6 +192,7 @@ pub struct PublishConfig {
     pub screen_share: bool,
     /// Tell WebRTC the content is detail (screencast) rather than motion.
     pub detail_hint: bool,
+    pub audio: AudioConfig,
 }
 
 impl PublishConfig {
@@ -274,7 +343,18 @@ struct Remote {
     consumer: Option<tokio::task::JoinHandle<()>>,
 }
 
+struct PublishedAudio {
+    track: LocalAudioTrack,
+    sid: TrackSid,
+    /// The tone generator, when the input is the tone.
+    task: Option<tokio::task::JoinHandle<()>>,
+    /// Holds the microphone (and speaker playout) open while published.
+    platform: Option<PlatformAudio>,
+    label: String,
+}
+
 struct Published {
+    audio: Option<PublishedAudio>,
     track: LocalVideoTrack,
     video_source: NativeVideoSource,
     sid: TrackSid,
@@ -295,6 +375,8 @@ struct Prev {
     outs: HashMap<String, RawOut>,
     inn: Option<RawIn>,
     captured: u64,
+    audio_out: Option<RawAudioOut>,
+    audio_in: Option<RawAudioIn>,
 }
 
 struct Connection {
@@ -304,6 +386,8 @@ struct Connection {
     pub_room: Room,
     pub_drain: tokio::task::JoinHandle<()>,
     remote: Option<Remote>,
+    /// Our publisher's audio as the subscriber receives it.
+    remote_audio: Option<(RemoteAudioTrack, TrackSid)>,
     published: Option<Published>,
     sink_frames: Arc<AtomicU64>,
     viewers: HashMap<String, (ReceiveRow, Instant)>,
@@ -562,6 +646,7 @@ impl Engine {
             pub_room,
             pub_drain,
             remote: None,
+            remote_audio: None,
             published: None,
             sink_frames: Arc::new(AtomicU64::new(0)),
             viewers: HashMap::new(),
@@ -662,6 +747,21 @@ impl Engine {
             }
         };
 
+        let audio = match self.conn.as_ref() {
+            Some(c) if cfg.audio.input != AudioInput::Off => {
+                Some(publish_audio(&c.pub_room, &cfg.audio).await)
+            }
+            _ => None,
+        };
+        let audio = match audio {
+            Some(Ok(a)) => Some(a),
+            Some(Err(e)) => {
+                self.event(format!("Audio not published: {e}"));
+                None
+            }
+            None => None,
+        };
+
         let sid = publication.sid();
         let label = format!(
             "Published {} {}×{} @ {} fps, {}, cap {:.1} Mbps",
@@ -680,6 +780,7 @@ impl Engine {
             conn.prev = Prev::default();
             conn.health_window.clear();
             conn.published = Some(Published {
+                audio,
                 track,
                 video_source: source,
                 sid,
@@ -693,8 +794,17 @@ impl Engine {
                 cfg: cfg.clone(),
             });
         }
+        let audio_label = self
+            .conn
+            .as_ref()
+            .and_then(|c| c.published.as_ref())
+            .and_then(|p| p.audio.as_ref())
+            .map(|a| a.label.clone());
         self.shared.lock().active_publish = Some(cfg);
         self.event(label);
+        if let Some(l) = audio_label {
+            self.event(l);
+        }
         self.set_phase(Phase::Publishing);
     }
 
@@ -768,6 +878,9 @@ impl Engine {
             .local_participant()
             .unpublish_track(&p.sid)
             .await;
+        if let Some(a) = p.audio.take() {
+            stop_audio(&conn.pub_room, a).await;
+        }
         drop(p.track);
         {
             let mut s = self.shared.lock();
@@ -786,6 +899,7 @@ impl Engine {
         };
         self.set_phase(Phase::Disconnecting);
         let mut published_sid = None;
+        let mut audio_sid = None;
         if let Some(mut p) = conn.published.take() {
             p.stop.store(true, Ordering::SeqCst);
             if let Some(t) = p.thread.take() {
@@ -797,14 +911,22 @@ impl Engine {
                 .await;
             }
             published_sid = Some(p.sid.clone());
+            if let Some(a) = p.audio.take() {
+                if let Some(t) = &a.task {
+                    t.abort();
+                }
+                audio_sid = Some(a.sid.clone());
+                drop(a.platform);
+            }
         }
+        conn.remote_audio = None;
         if let Some(r) = conn.remote.take() {
             if let Some(c) = r.consumer {
                 c.abort();
             }
         }
         // Unpublish first: it is quick, and viewers see the track end at once.
-        if let Some(sid) = published_sid {
+        for sid in [published_sid, audio_sid].into_iter().flatten() {
             let _ = tokio::time::timeout(
                 Duration::from_secs(2),
                 conn.pub_room.local_participant().unpublish_track(&sid),
@@ -921,6 +1043,35 @@ impl Engine {
                     conn.requested = Some((size, Instant::now()));
                 }
                 self.event("Subscriber receiving the published video");
+            }
+            RoomEvent::TrackSubscribed {
+                track: RemoteTrack::Audio(a),
+                publication,
+                participant,
+            } => {
+                if !participant
+                    .identity()
+                    .to_string()
+                    .starts_with("workbench-pub-")
+                {
+                    return;
+                }
+                if let Some(conn) = self.conn.as_mut() {
+                    conn.remote_audio = Some((a, publication.sid()));
+                    conn.prev.audio_in = None;
+                }
+                self.event("Subscriber receiving the published audio");
+            }
+            RoomEvent::TrackUnsubscribed {
+                track: RemoteTrack::Audio(_),
+                publication,
+                ..
+            } => {
+                if let Some(conn) = self.conn.as_mut() {
+                    if conn.remote_audio.as_ref().map(|(_, sid)| sid) == Some(&publication.sid()) {
+                        conn.remote_audio = None;
+                    }
+                }
             }
             RoomEvent::TrackUnsubscribed {
                 track: RemoteTrack::Video(_),
@@ -1078,6 +1229,26 @@ impl Engine {
                 .await
                 .ok()
                 .and_then(|s| stats::inbound(&s)),
+            None => None,
+        };
+        let (audio_out, audio_label) = match conn.published.as_ref().and_then(|p| p.audio.as_ref())
+        {
+            Some(a) => (
+                a.track
+                    .get_stats()
+                    .await
+                    .ok()
+                    .and_then(|s| stats::audio_outbound(&s)),
+                a.label.clone(),
+            ),
+            None => (None, String::new()),
+        };
+        let audio_in = match &conn.remote_audio {
+            Some((t, _)) => t
+                .get_stats()
+                .await
+                .ok()
+                .and_then(|s| stats::audio_inbound(&s)),
             None => None,
         };
         let captured = conn
@@ -1304,6 +1475,16 @@ impl Engine {
             receive.extend(viewers);
             snap.receive = receive;
 
+            // Audio, both directions.
+            snap.audio = stats::audio_rates(
+                audio_out
+                    .as_ref()
+                    .map(|o| (o, conn.prev.audio_out.as_ref())),
+                audio_in.as_ref().map(|i| (i, conn.prev.audio_in.as_ref())),
+                dt,
+            );
+            snap.audio.source = audio_label;
+
             // Requested tile size.
             snap.requested_size = conn.requested.map(|(s, _)| s);
             snap.server_quality_pub = conn.quality_pub.map(|q| quality_label(q).to_string());
@@ -1441,6 +1622,8 @@ impl Engine {
             outs: out_stats.into_iter().map(|o| (o.rid.clone(), o)).collect(),
             inn: in_stats,
             captured,
+            audio_out,
+            audio_in,
         };
         (self.repaint)();
 
@@ -1473,6 +1656,117 @@ impl Default for CaptureCounters {
 }
 
 /// Run the source on its own thread, scaling every frame to the publish size.
+/// Publish the audio track: a tone from a NativeAudioSource, or a microphone
+/// through the SDK's platform audio.
+async fn publish_audio(room: &Room, cfg: &AudioConfig) -> Result<PublishedAudio, String> {
+    const RATE: u32 = 48_000;
+    let (source, task, platform, what) = match &cfg.input {
+        AudioInput::Off => return Err("audio is off".into()),
+        AudioInput::Tone => {
+            let src = NativeAudioSource::new(AudioSourceOptions::default(), RATE, 1, 100);
+            let feed = src.clone();
+            let task = tokio::spawn(async move {
+                let mut n: u64 = 0;
+                loop {
+                    let frame = AudioFrame {
+                        data: tone_frame(n, RATE).into(),
+                        sample_rate: RATE,
+                        num_channels: 1,
+                        samples_per_channel: RATE / 100,
+                    };
+                    // Waits while the source's queue is full, so this runs in real time.
+                    if feed.capture_frame(&frame).await.is_err() {
+                        break;
+                    }
+                    n += 1;
+                }
+            });
+            (
+                RtcAudioSource::Native(src),
+                Some(task),
+                None,
+                "synthetic tone".to_string(),
+            )
+        }
+        AudioInput::Microphone(name) => {
+            let audio = PlatformAudio::new().map_err(|e| format!("microphone: {e}"))?;
+            let index = audio
+                .recording_devices()
+                .find(|d| &d.name == name)
+                .map(|d| d.index)
+                .ok_or_else(|| format!("microphone \"{name}\" is not connected"))?;
+            audio
+                .set_recording_device_by_index(index)
+                .map_err(|e| format!("selecting the microphone: {e}"))?;
+            let _ = audio.set_echo_cancellation(cfg.echo_cancellation, false);
+            let _ = audio.set_auto_gain_control(cfg.auto_gain, false);
+            let _ = audio.set_noise_suppression(cfg.noise_suppression, false);
+            (audio.rtc_source(), None, Some(audio), name.clone())
+        }
+    };
+    let track = LocalAudioTrack::create_audio_track("workbench-audio", source);
+    let opts = TrackPublishOptions {
+        source: TrackSource::Microphone,
+        audio_encoding: Some(AudioEncoding {
+            max_bitrate: cfg.bitrate_bps,
+        }),
+        dtx: cfg.dtx,
+        red: cfg.red,
+        ..Default::default()
+    };
+    match room
+        .local_participant()
+        .publish_track(LocalTrack::Audio(track.clone()), opts)
+        .await
+    {
+        Ok(publication) => Ok(PublishedAudio {
+            track,
+            sid: publication.sid(),
+            task,
+            platform,
+            label: format!(
+                "Published audio from {what}, Opus up to {} kbps{}{}",
+                cfg.bitrate_bps / 1000,
+                if cfg.dtx { ", DTX" } else { "" },
+                if cfg.red { ", RED" } else { "" }
+            ),
+        }),
+        Err(e) => {
+            if let Some(t) = task {
+                t.abort();
+            }
+            Err(e.to_string())
+        }
+    }
+}
+
+async fn stop_audio(room: &Room, a: PublishedAudio) {
+    if let Some(t) = &a.task {
+        t.abort();
+    }
+    let _ = tokio::time::timeout(
+        Duration::from_secs(2),
+        room.local_participant().unpublish_track(&a.sid),
+    )
+    .await;
+    drop(a.platform);
+}
+
+/// 10 ms of a 440 Hz beep: 600 ms on, 400 ms off, so DTX has silence to skip.
+fn tone_frame(n: u64, rate: u32) -> Vec<i16> {
+    let per = (rate / 100) as u64;
+    let on = (n % 100) < 60;
+    (0..per)
+        .map(|i| {
+            if !on {
+                return 0;
+            }
+            let t = (n * per + i) as f64 / rate as f64;
+            (f64::sin(2.0 * std::f64::consts::PI * 440.0 * t) * 8000.0) as i16
+        })
+        .collect()
+}
+
 fn spawn_capture(
     cfg: &PublishConfig,
     (pub_w, pub_h): (u32, u32),
