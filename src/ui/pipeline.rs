@@ -700,6 +700,15 @@ impl App {
                             .wrap(),
                         );
                     }
+                    // The screen is only captured while publishing: macOS asks
+                    // which screen each time capture starts.
+                    let empty = if self.form.source == crate::capture::SourceKind::Screen
+                        && self.session.phase() != Phase::Publishing
+                    {
+                        "Screen: shown once you publish (macOS asks which screen or window)"
+                    } else {
+                        "No local video"
+                    };
                     if self.local_undocked {
                         self.docked_placeholder(ui, width, height, true);
                     } else {
@@ -708,7 +717,7 @@ impl App {
                             &local_slot,
                             "local",
                             egui::vec2(width, height),
-                            "No local video",
+                            empty,
                         );
                     }
                 });

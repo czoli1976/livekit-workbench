@@ -986,6 +986,9 @@ impl App {
         if matches!(cfg.source, SourceKind::Camera(_)) {
             crate::capture::camera_access().map_err(|e| format!("{e:#}"))?;
         }
+        if cfg.source == SourceKind::Screen {
+            crate::capture::screen_access().map_err(|e| format!("{e:#}"))?;
+        }
         self.caps.encoder_allowed(cfg.codec, cfg.encoder)?;
         if cfg.layering == Layering::Simulcast
             && !crate::capabilities::codec_supports_simulcast(cfg.codec)

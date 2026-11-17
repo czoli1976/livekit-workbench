@@ -34,6 +34,19 @@ use crate::session::{
     AudioConfig, AudioInput, ConnectConfig, Layering, Phase, PublishConfig, Session,
 };
 
+/// "detail", "pattern", "screen" or "camera" (the first camera).
+fn parse_source(s: &str) -> SourceKind {
+    match s {
+        "pattern" => SourceKind::Pattern,
+        "screen" => SourceKind::Screen,
+        "camera" => crate::capture::list_cameras()
+            .ok()
+            .and_then(|c| c.first().map(|c| SourceKind::Camera(c.index)))
+            .unwrap_or(SourceKind::Detail),
+        _ => SourceKind::Detail,
+    }
+}
+
 /// "LOSS%,DELAY,JITTER,KBPS", trailing fields optional: "2" or "1,40,10,1500".
 fn parse_impairment(s: &str) -> crate::impair::Impairment {
     let v: Vec<f32> = s
@@ -284,11 +297,9 @@ pub fn run(args: &[String]) -> i32 {
         "simulcast" => Layering::Simulcast,
         m => Layering::Svc(m.to_string()),
     };
-    let source = if opt(args, "--source") == Some("pattern") {
-        SourceKind::Pattern
-    } else {
-        SourceKind::Detail
-    };
+    let source = opt(args, "--source")
+        .map(parse_source)
+        .unwrap_or(SourceKind::Detail);
     let seconds: u64 = opt(args, "--seconds")
         .and_then(|v| v.parse().ok())
         .unwrap_or(10);
@@ -477,6 +488,29 @@ pub fn run(args: &[String]) -> i32 {
         let (rh, rfps) = line(&session, 0);
         println!("after source switch: receiving {rh}p at {rfps:.1} fps");
         ok &= rh > 0 && rfps > 0.0;
+    }
+
+    // --switch screen,camera: switch the live input in turn, 8 s each.
+    if let Some(list) = opt(args, "--switch") {
+        for name in list.split(',') {
+            let mut next = publish.clone();
+            next.source = parse_source(name);
+            session.switch_source(next);
+            for sec in 1..=8 {
+                std::thread::sleep(Duration::from_secs(1));
+                let snap = session.shared.lock().snapshot.clone();
+                let err = session.shared.lock().error.clone();
+                println!(
+                    "switch {name} {sec}s: capture {}x{}@{:.1} ({}) phase {:?} error {:?}",
+                    snap.capture.width,
+                    snap.capture.height,
+                    snap.capture.fps,
+                    snap.capture.note,
+                    session.phase(),
+                    err
+                );
+            }
+        }
     }
 
     let started = Instant::now();

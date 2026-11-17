@@ -894,7 +894,20 @@ impl Engine {
             Err(e) => format!("Could not restart capture: {e}"),
         };
         let active = p.cfg.clone();
-        self.shared.lock().active_publish = Some(active);
+        let restarted = p.thread.is_some();
+        {
+            let mut sh = self.shared.lock();
+            sh.active_publish = Some(active);
+            // A new input clears the previous input's failure.
+            if restarted
+                && sh
+                    .error
+                    .as_deref()
+                    .is_some_and(|e| e.starts_with("Input stopped"))
+            {
+                sh.error = None;
+            }
+        }
         self.event(msg);
     }
 
@@ -1720,9 +1733,14 @@ impl Engine {
         };
         (self.repaint)();
 
+        // An input that fails leaves the track published, so another input
+        // can be switched in live; ending the publish here made later input
+        // changes silently do nothing.
         if let Some(e) = capture_error {
-            self.set_error(Some(format!("Capture stopped: {e}")));
-            self.unpublish().await;
+            self.set_error(Some(format!(
+                "Input stopped: {e}. The track is still published: choose another input."
+            )));
+            self.event(format!("Input stopped: {e}"));
         }
     }
 }
