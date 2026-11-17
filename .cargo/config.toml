@@ -1,0 +1,9 @@
+# The prebuilt libwebrtc for Windows is compiled against the static MSVC
+# runtime (/MT). Rust and the cc crate default to the dynamic runtime (/MD),
+# and link.exe then fails with LNK2038. crt-static makes both use /MT.
+# https://github.com/livekit/rust-sdks/blob/main/.cargo/config.toml
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
