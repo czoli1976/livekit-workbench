@@ -15,6 +15,7 @@
 //!     --audio tone|MICROPHONE-NAME     also publish audio, and require it to arrive
 //!     --audio-kbps N                   Opus bitrate cap (default 32)
 //!     --no-dtx, --no-red               turn off Opus DTX or redundant audio
+//!     --no-aec, --no-ns, --no-agc      turn off WebRTC's audio processing
 //!     --up LOSS%,DELAY,JITTER,KBPS     impair the publisher's uplink (in-app relay)
 //!     --down LOSS%,DELAY,JITTER,KBPS   impair the subscriber's downlink
 //!     --lifecycle                      also exercise unpublish, publish, republish, switch source
@@ -330,7 +331,9 @@ pub fn run(args: &[String]) -> i32 {
                 * 1000,
             dtx: !args.iter().any(|a| a == "--no-dtx"),
             red: !args.iter().any(|a| a == "--no-red"),
-            ..Default::default()
+            echo_cancellation: !args.iter().any(|a| a == "--no-aec"),
+            noise_suppression: !args.iter().any(|a| a == "--no-ns"),
+            auto_gain: !args.iter().any(|a| a == "--no-agc"),
         },
     };
     let impair_up = opt(args, "--up").map(parse_impairment);

@@ -837,7 +837,7 @@ impl App {
                 if a.red {
                     parts.push("RED".into());
                 }
-                if matches!(a.input, AudioInput::Microphone(_)) {
+                {
                     for (on, name) in [
                         (a.echo_cancellation, "AEC"),
                         (a.noise_suppression, "NS"),
@@ -894,20 +894,17 @@ impl App {
                     );
                 });
                 ui.end_row();
-                let mic = matches!(a.input, AudioInput::Microphone(_));
                 ui.label("WebRTC processing");
-                ui.add_enabled_ui(mic, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut a.echo_cancellation, "AEC")
-                            .on_hover_text("WebRTC's acoustic echo canceller (software, not the device's).");
-                        ui.checkbox(&mut a.noise_suppression, "NS")
-                            .on_hover_text("WebRTC's noise suppression (software, not the device's).");
-                        ui.checkbox(&mut a.auto_gain, "AGC")
-                            .on_hover_text("WebRTC's automatic gain control (software, not the device's).");
-                    });
-                })
-                .response
-                .on_disabled_hover_text("Applies to a microphone: WebRTC's audio processing runs on what the audio device captures, not on the synthetic tone.");
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut a.echo_cancellation, "AEC").on_hover_text(
+                        "WebRTC's acoustic echo canceller (software, not the device's). It removes what the speakers play from what the microphone hears; with the tone there is no echo to remove.",
+                    );
+                    ui.checkbox(&mut a.noise_suppression, "NS").on_hover_text(
+                        "WebRTC's noise suppression (software, not the device's). On the tone it treats the steady beep partly as noise.",
+                    );
+                    ui.checkbox(&mut a.auto_gain, "AGC")
+                        .on_hover_text("WebRTC's automatic gain control (software, not the device's).");
+                });
                 ui.end_row();
             });
     }
