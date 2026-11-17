@@ -232,19 +232,40 @@ impl App {
         let active = self.session.shared.lock().active_publish.clone();
         let before = self.form.clone();
 
-        // ---- Source
-        section(ui, "Source");
-        egui::Grid::new("source-grid").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+        // ---- Sources: camera and microphone together
+        section(ui, "Sources");
+        self.video_card(ui);
+        ui.add_space(6.0);
+        self.audio_card(ui);
+
+        ui.separator();
+        // ---- Encode
+        section(ui, "Encode");
+        self.encode_and_rest(ui, phase, publishing, active, before);
+    }
+
+    /// The video source: icon, input picker, summary, and options that fold out.
+    fn video_card(&mut self, ui: &mut egui::Ui) {
+        widgets::source_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                ui.label("Input");
-                live_badge(ui);
-            });
-            ui.horizontal(|ui| {
-                let label = self.source_label(&self.form.source);
-                egui::ComboBox::from_id_salt("source")
-                    .selected_text(label)
-                    .width(190.0)
-                    .show_ui(ui, |ui| {
+                widgets::source_icon(
+                    ui,
+                    widgets::SourceIcon::Camera,
+                    super::theme::ACCENT_TEXT,
+                    super::theme::ACCENT_BG,
+                );
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Video").small().color(widgets::weak(ui)));
+                        live_badge(ui);
+                    });
+                    ui.horizontal(|ui| {
+                        let label = self.source_label(&self.form.source);
+                        egui::ComboBox::from_id_salt("source")
+                            .selected_text(label)
+                            .width(220.0)
+                            .show_ui(ui, |ui| {
                         ui.selectable_value(&mut self.form.source, SourceKind::Detail, "Synthetic: detailed motion")
                             .on_hover_text("A moving pattern plus fresh grain every frame: needs a realistic bitrate, like a camera.");
                         ui.selectable_value(&mut self.form.source, SourceKind::Pattern, "Synthetic: moving pattern")
@@ -259,12 +280,41 @@ impl App {
                             ui.selectable_value(&mut self.form.source, SourceKind::Camera(c.index), c.name);
                         }
                     });
-                if ui.small_button("⟳").on_hover_text("Rescan cameras").clicked() {
-                    self.refresh_cameras();
-                }
+                        if ui.small_button("⟳").on_hover_text("Rescan cameras").clicked() {
+                            self.refresh_cameras();
+                        }
+                    });
+                });
             });
-            ui.end_row();
+            ui.separator();
+            ui.horizontal(|ui| {
+                let summary = format!(
+                    "{}×{} · {} fps · {} · {}",
+                    self.form.capture.0,
+                    self.form.capture.1,
+                    self.form.fps,
+                    if self.form.screen_share { "Screen share" } else { "Camera" },
+                    if self.form.detail_hint { "Detail" } else { "Motion" },
+                );
+                ui.label(RichText::new(summary).monospace().small());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let text = if self.video_opts_open { "Options ▴" } else { "Options ▾" };
+                    if ui.small_button(text).clicked() {
+                        self.video_opts_open = !self.video_opts_open;
+                    }
+                });
+            });
+            if self.video_opts_open {
+                self.video_options(ui);
+            }
+            if let Some(e) = &self.camera_error {
+                ui.colored_label(widgets::red(ui), format!("Camera: {e}"));
+            }
+        });
+    }
 
+    fn video_options(&mut self, ui: &mut egui::Ui) {
+        egui::Grid::new("source-grid").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Capture");
                 live_badge(ui);
@@ -353,13 +403,16 @@ impl App {
                 });
             ui.end_row();
         });
-        if let Some(e) = &self.camera_error {
-            ui.colored_label(widgets::red(ui), format!("Camera: {e}"));
-        }
+    }
 
-        ui.separator();
-        // ---- Encode
-        section(ui, "Encode");
+    fn encode_and_rest(
+        &mut self,
+        ui: &mut egui::Ui,
+        phase: Phase,
+        publishing: bool,
+        active: Option<PublishConfig>,
+        before: PublishForm,
+    ) {
         egui::Grid::new("encode-grid")
             .num_columns(2)
             .spacing([8.0, 6.0])
@@ -617,10 +670,6 @@ impl App {
         );
 
         ui.separator();
-        // ---- Audio
-        self.audio_section(ui);
-
-        ui.separator();
         // ---- Network
         self.network_section(ui, phase);
 
@@ -734,39 +783,98 @@ impl App {
         }
     }
 
-    fn audio_section(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            section(ui, "Audio");
-            republish_badge(ui);
+    /// The audio source: icon, input picker, level, summary, and options that fold out.
+    fn audio_card(&mut self, ui: &mut egui::Ui) {
+        let level = {
+            let sh = self.session.shared.lock();
+            (!sh.snapshot.audio.source.is_empty()).then_some(sh.snapshot.audio.send_level)
+        };
+        widgets::source_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                widgets::source_icon(
+                    ui,
+                    widgets::SourceIcon::Microphone,
+                    super::theme::VIOLET,
+                    super::theme::VIOLET_BG,
+                );
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Audio").small().color(widgets::weak(ui)));
+                        republish_badge(ui);
+                    });
+                    let a = &mut self.form.audio;
+                    let mics = &mut self.microphones;
+                    egui::ComboBox::from_id_salt("audio-input")
+                        .selected_text(a.input.label())
+                        .width(220.0)
+                        .show_ui(ui, |ui| {
+                            // Listing opens the platform audio device, so only on demand.
+                            let list = mics.get_or_insert_with(crate::session::microphones);
+                            for name in list.iter() {
+                                ui.selectable_value(&mut a.input, AudioInput::Microphone(name.clone()), name);
+                            }
+                            ui.selectable_value(&mut a.input, AudioInput::Tone, "Synthetic tone")
+                                .on_hover_text("A 440 Hz beep, 0.6 s on and 0.4 s off. Needs no microphone and plays nothing here.");
+                            ui.selectable_value(&mut a.input, AudioInput::Off, "Off");
+                        });
+                });
+            });
+            if let Some(level) = level {
+                ui.add_space(4.0);
+                widgets::level_meter(ui, level, 8.0);
+            }
+            if self.form.audio.input == AudioInput::Off {
+                return;
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                let a = &self.form.audio;
+                let mut parts = vec![format!("Opus {} kbps", a.bitrate_bps / 1000)];
+                if a.dtx {
+                    parts.push("DTX".into());
+                }
+                if a.red {
+                    parts.push("RED".into());
+                }
+                if matches!(a.input, AudioInput::Microphone(_)) {
+                    for (on, name) in [
+                        (a.echo_cancellation, "AEC"),
+                        (a.noise_suppression, "NS"),
+                        (a.auto_gain, "AGC"),
+                    ] {
+                        if on {
+                            parts.push(name.into());
+                        }
+                    }
+                }
+                ui.label(RichText::new(parts.join(" · ")).monospace().small());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let text = if self.audio_opts_open { "Options ▴" } else { "Options ▾" };
+                    if ui.small_button(text).clicked() {
+                        self.audio_opts_open = !self.audio_opts_open;
+                    }
+                });
+            });
+            if self.audio_opts_open {
+                self.audio_options(ui);
+            }
         });
+        if matches!(self.form.audio.input, AudioInput::Microphone(_)) {
+            ui.label(
+                RichText::new("The app also receives its own audio and plays it, about a round trip late. Use headphones, or keep echo cancellation on.")
+                    .small()
+                    .color(widgets::amber(ui)),
+            );
+        }
+    }
+
+    fn audio_options(&mut self, ui: &mut egui::Ui) {
         let a = &mut self.form.audio;
-        let mics = &mut self.microphones;
         egui::Grid::new("audio-grid")
             .num_columns(2)
             .spacing([8.0, 4.0])
             .show(ui, |ui| {
-                ui.label("Input");
-                egui::ComboBox::from_id_salt("audio-input")
-                    .selected_text(a.input.label())
-                    .width(190.0)
-                    .show_ui(ui, |ui| {
-                        // Listing opens the platform audio device, so only on demand.
-                        let list = mics.get_or_insert_with(crate::session::microphones);
-                        ui.selectable_value(&mut a.input, AudioInput::Off, "Off");
-                        ui.selectable_value(&mut a.input, AudioInput::Tone, "Synthetic tone")
-                            .on_hover_text("A 440 Hz beep, 0.6 s on and 0.4 s off. Needs no microphone and plays nothing here.");
-                        for name in list.iter() {
-                            ui.selectable_value(
-                                &mut a.input,
-                                AudioInput::Microphone(name.clone()),
-                                format!("🎤 {name}"),
-                            );
-                        }
-                    });
-                ui.end_row();
-                if a.input == AudioInput::Off {
-                    return;
-                }
                 ui.label("Opus bitrate");
                 egui::ComboBox::from_id_salt("audio-bitrate")
                     .selected_text(format!("{} kbps", a.bitrate_bps / 1000))
@@ -786,26 +894,22 @@ impl App {
                     );
                 });
                 ui.end_row();
-                if matches!(a.input, AudioInput::Microphone(_)) {
-                    ui.label("Processing");
+                let mic = matches!(a.input, AudioInput::Microphone(_));
+                ui.label("WebRTC processing");
+                ui.add_enabled_ui(mic, |ui| {
                     ui.horizontal(|ui| {
                         ui.checkbox(&mut a.echo_cancellation, "AEC")
-                            .on_hover_text("Echo cancellation");
-                        ui.checkbox(&mut a.auto_gain, "AGC")
-                            .on_hover_text("Automatic gain control");
+                            .on_hover_text("WebRTC's acoustic echo canceller (software, not the device's).");
                         ui.checkbox(&mut a.noise_suppression, "NS")
-                            .on_hover_text("Noise suppression");
+                            .on_hover_text("WebRTC's noise suppression (software, not the device's).");
+                        ui.checkbox(&mut a.auto_gain, "AGC")
+                            .on_hover_text("WebRTC's automatic gain control (software, not the device's).");
                     });
-                    ui.end_row();
-                }
+                })
+                .response
+                .on_disabled_hover_text("Applies to a microphone: WebRTC's audio processing runs on what the audio device captures, not on the synthetic tone.");
+                ui.end_row();
             });
-        if matches!(a.input, AudioInput::Microphone(_)) {
-            ui.label(
-                RichText::new("The app also receives its own audio and plays it, about a round trip late. Use headphones, or keep echo cancellation on.")
-                    .small()
-                    .color(widgets::amber(ui)),
-            );
-        }
     }
 
     /// Pending republish changes, pinned above the scrolling settings so it is

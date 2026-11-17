@@ -50,6 +50,8 @@ pub struct Saved {
     pub audio_aec: Option<bool>,
     pub audio_agc: Option<bool>,
     pub audio_ns: Option<bool>,
+    pub video_opts_open: Option<bool>,
+    pub audio_opts_open: Option<bool>,
     pub impair: Option<bool>,
     pub impair_up: Option<crate::impair::Impairment>,
     pub impair_down: Option<crate::impair::Impairment>,
@@ -151,6 +153,8 @@ impl App {
             audio_aec: Some(f.audio.echo_cancellation),
             audio_agc: Some(f.audio.auto_gain),
             audio_ns: Some(f.audio.noise_suppression),
+            video_opts_open: Some(self.video_opts_open),
+            audio_opts_open: Some(self.audio_opts_open),
             impair: Some(self.impair_on),
             impair_up: Some(impair_up),
             impair_down: Some(impair_down),
@@ -254,6 +258,12 @@ impl App {
             if let Some(v) = v {
                 *slot = v;
             }
+        }
+        if let Some(v) = s.video_opts_open {
+            self.video_opts_open = v;
+        }
+        if let Some(v) = s.audio_opts_open {
+            self.audio_opts_open = v;
         }
         if let Some(v) = s.impair {
             self.impair_on = v;

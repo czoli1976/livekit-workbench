@@ -99,6 +99,9 @@ pub struct App {
     >,
     /// The left settings panel is open.
     settings_open: bool,
+    /// Whether each source card's options are folded out.
+    video_opts_open: bool,
+    audio_opts_open: bool,
     test_pending_done: bool,
     codec_versions: crate::codec_versions::CodecVersions,
     /// End-to-end encryption for the next connection, and its passphrase.
@@ -187,6 +190,8 @@ impl App {
             browser_adaptive: false,
             seen: Default::default(),
             settings_open: true,
+            video_opts_open: true,
+            audio_opts_open: false,
             test_pending_done: false,
             codec_versions: crate::codec_versions::read(),
             e2ee_on: false,

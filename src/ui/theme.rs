@@ -35,6 +35,7 @@ pub const RED: Color32 = Color32::from_rgb(0xff, 0x7b, 0x72);
 pub const RED_LINE: Color32 = Color32::from_rgb(0xe5, 0x53, 0x4b);
 
 pub const VIOLET: Color32 = Color32::from_rgb(0xc8, 0xb5, 0xff);
+pub const VIOLET_BG: Color32 = Color32::from_rgb(0x2a, 0x21, 0x40);
 
 /// Apply the visuals, spacing and fonts once at start-up.
 pub fn install(ctx: &egui::Context) {

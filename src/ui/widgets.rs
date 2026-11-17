@@ -370,3 +370,80 @@ mod tests {
         assert_eq!(fmt_axis(25.0), "25");
     }
 }
+
+/// Which glyph a source icon draws.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SourceIcon {
+    Camera,
+    Microphone,
+}
+
+/// A 34-pixel rounded tile with a camera or microphone glyph, drawn with
+/// strokes so it needs no icon font.
+pub fn source_icon(ui: &mut egui::Ui, icon: SourceIcon, fg: Color32, bg: Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(34.0, 34.0), egui::Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, 8.0, bg);
+    let s = Stroke::new(1.8, fg);
+    let c = rect.center();
+    match icon {
+        SourceIcon::Camera => {
+            let body =
+                egui::Rect::from_min_size(c + egui::vec2(-10.0, -6.0), egui::vec2(13.0, 12.0));
+            p.rect_stroke(body, 2.5, s, StrokeKind::Middle);
+            p.line_segment([c + egui::vec2(3.0, -1.5), c + egui::vec2(9.5, -5.0)], s);
+            p.line_segment([c + egui::vec2(9.5, -5.0), c + egui::vec2(9.5, 5.0)], s);
+            p.line_segment([c + egui::vec2(9.5, 5.0), c + egui::vec2(3.0, 1.5)], s);
+        }
+        SourceIcon::Microphone => {
+            let capsule =
+                egui::Rect::from_min_size(c + egui::vec2(-3.5, -10.0), egui::vec2(7.0, 12.5));
+            p.rect_stroke(capsule, 3.5, s, StrokeKind::Middle);
+            // The cradle: a half circle under the capsule.
+            let pts: Vec<egui::Pos2> = (0..=16)
+                .map(|i| {
+                    let a = std::f32::consts::PI * i as f32 / 16.0;
+                    c + egui::vec2(-7.0 * a.cos(), -2.0 + 7.0 * a.sin())
+                })
+                .collect();
+            p.add(egui::Shape::line(pts, s));
+            p.line_segment([c + egui::vec2(0.0, 5.0), c + egui::vec2(0.0, 10.0)], s);
+        }
+    }
+}
+
+/// A 20-segment level meter for a 0..1 audio level (WebRTC's audioLevel).
+pub fn level_meter(ui: &mut egui::Ui, level: f64, height: f32) {
+    let w = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, height), egui::Sense::hover());
+    let n = 20;
+    let gap = 2.0;
+    let seg = (rect.width() - gap * (n as f32 - 1.0)) / n as f32;
+    // audioLevel is linear; show it on a dB scale from -60 dB, like a VU meter.
+    let db = if level > 0.0 {
+        20.0 * level.log10()
+    } else {
+        -60.0
+    };
+    let lit = (((db + 60.0) / 60.0).clamp(0.0, 1.0) * n as f64).round() as usize;
+    for i in 0..n {
+        let x = rect.left() + i as f32 * (seg + gap);
+        let r = egui::Rect::from_min_size(egui::pos2(x, rect.top()), egui::vec2(seg, height));
+        let on = match i {
+            17.. => theme::RED,
+            14.. => theme::AMBER,
+            _ => theme::GREEN,
+        };
+        ui.painter()
+            .rect_filled(r, 2.0, if i < lit { on } else { theme::RAISED });
+    }
+}
+
+/// The card around one source in the Sources section.
+pub fn source_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(theme::BG)
+        .stroke(Stroke::new(1.0, theme::BORDER))
+        .corner_radius(8)
+        .inner_margin(egui::Margin::same(10))
+}
