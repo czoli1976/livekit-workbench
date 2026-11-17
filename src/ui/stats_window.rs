@@ -730,6 +730,7 @@ impl App {
                 "in the log since start".into(),
             );
         });
+        sfu_view(ui, &st);
         ui.add_space(6.0);
         ui.label(
             RichText::new(
@@ -776,6 +777,70 @@ impl App {
                 }
             });
     }
+}
+
+/// The SFU's own measurements, from its Prometheus histograms.
+fn sfu_view(ui: &mut egui::Ui, st: &crate::local_server::ServerStats) {
+    use crate::local_server::HistValue;
+    ui.add_space(8.0);
+    ui.label(RichText::new("What the SFU measures").strong());
+    if st.sfu.is_empty() {
+        ui.label(
+            RichText::new("Nothing reported yet. The server records these per track every few seconds while media flows.")
+                .small()
+                .color(widgets::weak(ui)),
+        );
+        return;
+    }
+    let cell = |v: &HistValue, unit: &str, d: usize| -> String {
+        match (v.last, v.avg) {
+            (Some(l), Some(a)) => format!("{l:.d$}{unit}  (avg {a:.d$})"),
+            (None, Some(a)) => format!("avg {a:.d$}{unit}"),
+            _ => "–".into(),
+        }
+    };
+    let age = |r: &crate::local_server::SfuRow| -> String {
+        [r.loss_pct.at, r.rtt_ms.at, r.jitter_ms.at]
+            .into_iter()
+            .flatten()
+            .max()
+            .map(|t| format!("{} s ago", t.elapsed().as_secs()))
+            .unwrap_or_else(|| "–".into())
+    };
+    egui::Grid::new("sfu-hist")
+        .num_columns(6)
+        .striped(true)
+        .spacing([16.0, 4.0])
+        .show(ui, |ui| {
+            for h in ["", "Loss", "Jitter", "RTT", "Out of order", "Last report"] {
+                ui.label(RichText::new(h).small().color(widgets::weak(ui)));
+            }
+            ui.end_row();
+            for r in &st.sfu {
+                ui.label(r.label);
+                ui.label(cell(&r.loss_pct, " %", 1));
+                ui.label(cell(&r.jitter_ms, " ms", 1));
+                ui.label(cell(&r.rtt_ms, " ms", 0));
+                ui.label(cell(&r.out_of_order_pct, " %", 2));
+                ui.label(RichText::new(age(r)).small().color(widgets::weak(ui)));
+                ui.end_row();
+            }
+        });
+    let q = &st.quality_score;
+    let fwd = &st.forward_latency_ms;
+    ui.label(
+        RichText::new(format!(
+            "Connection quality score (1 to 5, all participants): {} · forwarding latency inside the SFU: {}",
+            cell(q, "", 2),
+            if fwd.avg.is_some_and(|v| v > 0.0) { cell(fwd, " ms", 2) } else { "not recorded by this server".into() }
+        ))
+        .small(),
+    );
+    ui.label(
+        RichText::new("Publisher → SFU is what the server receives from publishers; SFU → subscriber is what subscribers report back to it in RTCP. Each value is the latest report, averaged over the tracks that reported, with the average since the server started in brackets. They are server-wide: on a shared server they include other participants. Only the app's own local server exposes them; LiveKit Cloud does not.")
+            .small()
+            .color(widgets::weak(ui)),
+    );
 }
 
 fn tile(ui: &mut egui::Ui, title: &str, value: String, sub: String) {

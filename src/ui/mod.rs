@@ -214,6 +214,10 @@ impl App {
             for w in open.split(',') {
                 match w.trim() {
                     "stats" => app.show_stats = true,
+                    "server" => {
+                        app.show_stats = true;
+                        app.stats_ui.tab = stats_window::StatsTab::Server;
+                    }
                     "caps" => app.show_caps = true,
                     "profiles" => app.show_profiles = true,
                     "about" => app.show_about = true,
@@ -234,6 +238,10 @@ impl App {
         // sources stay one click away, and are the input when there is no camera.
         if let Some(c) = app.cameras.first() {
             app.form.source = SourceKind::Camera(c.index);
+        }
+        // WB_OPEN=…,pattern: a synthetic source, so scripted runs need no camera.
+        if std::env::var("WB_OPEN").is_ok_and(|o| o.split(',').any(|w| w.trim() == "pattern")) {
+            app.form.source = SourceKind::Pattern;
         }
         // Settings from the last run, unless this is a scripted dev launch.
         if app.persist_settings {
