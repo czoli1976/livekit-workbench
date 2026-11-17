@@ -64,7 +64,7 @@ Version 1.0 was tested with SDK 0.11.0. *About* shows the exact SDK version the 
 | | macOS | Linux | Windows |
 |---|---|---|---|
 | Rust | rustup | rustup | rustup |
-| Build tools | Xcode command line tools | apt or dnf packages (X11/Wayland, OpenGL, V4L2, clang) | Visual Studio C++ build tools (winget) |
+| Build tools | Xcode command line tools | apt or dnf packages (X11/Wayland, OpenGL, V4L2), plus clang 21 for WebRTC | Visual Studio C++ build tools (winget) |
 | livekit-server | Homebrew (`brew install livekit`) | GitHub release, checksum-verified, into the app's data folder | GitHub release, checksum-verified, into the app's data folder |
 
 ## Using it

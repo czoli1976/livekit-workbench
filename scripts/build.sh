@@ -104,6 +104,25 @@ ensure_platform_deps() {
   fi
 }
 
+# webrtc-sys rejects the distro clang on Ubuntu 24 (clang 18). clang 21+ is
+# required, and CC/CXX have to name it: otherwise the build finds clang++ on PATH.
+ensure_clang() {
+  [[ $PLATFORM == linux ]] || return 0
+  local out status
+  if out="$("$ROOT/scripts/install-clang.sh")"; then
+    eval "$out"
+    say "Using $("$CXX" --version | head -1)"
+    return
+  else
+    status=$?
+  fi
+  [[ $status -eq 2 ]] || exit "$status"
+  confirm "WebRTC needs clang 21 or newer. Install it with apt?" || die "clang 21 or newer is required."
+  out="$("$ROOT/scripts/install-clang.sh" --install)"
+  eval "$out"
+  say "Using $("$CXX" --version | head -1)"
+}
+
 # ------------------------------------------------------------ livekit-server
 find_server() {
   command -v livekit-server 2>/dev/null && return
@@ -181,6 +200,7 @@ select_sdk() {
 # ------------------------------------------------------------------- build
 ensure_rust
 ensure_platform_deps
+ensure_clang
 [[ $SERVER -eq 1 ]] && install_server
 select_sdk
 

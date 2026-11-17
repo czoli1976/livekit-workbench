@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, ubuntu-24.04, windows-2022]
+        os: [macos-15, ubuntu-24.04, windows-2022]
     steps:
       - uses: actions/checkout@v4
 
@@ -27,10 +27,15 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config clang libclang-dev \
+          sudo apt-get install -y build-essential pkg-config clang libclang-dev gnupg \
             libx11-dev libxext-dev libxrandr-dev libxi-dev libxcursor-dev libxfixes-dev libxdamage-dev libxcomposite-dev libxtst-dev \
             libxkbcommon-dev libwayland-dev libgl1-mesa-dev libegl1-mesa-dev libgbm-dev libdrm-dev libva-dev \
             libv4l-dev libglib2.0-dev libasound2-dev libpulse-dev libssl-dev libdbus-1-dev
+
+      # Ubuntu 24 ships clang 18. webrtc-sys needs clang 21, via CC and CXX.
+      - name: Clang 21 for WebRTC
+        if: runner.os == 'Linux'
+        run: scripts/install-clang.sh --install
 
       - uses: Swatinem/rust-cache@v2
 
