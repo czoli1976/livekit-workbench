@@ -1,0 +1,43 @@
+# CodeRabbit AI review settings: https://docs.coderabbit.ai/reference/configuration
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: en-GB
+reviews:
+  profile: chill
+  high_level_summary: true
+  poem: false
+  review_status: true
+  request_changes_workflow: false
+  auto_review:
+    enabled: true
+    drafts: false
+    # Every target branch, not only the default one.
+    base_branches:
+      - ".*"
+  path_filters:
+    - "!target/**"
+    - "!dist/**"
+    - "!docs/screenshots/**"
+    - "!Cargo.lock"
+  path_instructions:
+    - path: "src/**/*.rs"
+      instructions: >-
+        Rust desktop app on the stock LiveKit Rust SDK (no SDK patches). Watch for
+        parking_lot locks held across .await or across a second lock() of the same
+        mutex, blocking calls on the egui UI thread, and unwraps on data from the
+        network, the SDK or the user. User-facing text is plain British English.
+    - path: "src/codec_versions.rs"
+      instructions: >-
+        FFI into the libraries bundled in the SDK's prebuilt WebRTC; check symbol
+        names, pointer handling and that nothing is called that could be absent on
+        Linux or Windows builds.
+    - path: "scripts/**"
+      instructions: >-
+        Install and build scripts for macOS, Linux (bash) and Windows (PowerShell).
+        They must ask before installing, verify downloads, and never need sudo except
+        through the system package manager.
+    - path: "assets/*.html"
+      instructions: >-
+        Browser pages served on 127.0.0.1 by the app; tokens travel in the URL
+        fragment. Check that nothing leaks the token to a third party.
+chat:
+  auto_reply: true
